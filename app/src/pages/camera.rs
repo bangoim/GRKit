@@ -6,83 +6,156 @@ use nsh_core::prelude::*;
 use crate::domain::{CameraModel, ConnectionState};
 use crate::store::{AppState, is_up_to_date};
 use crate::strings::tr;
-use crate::ui::{
-    camera_art, chevron_row, gr_mark, grouped_card, info_row, primary_button, status_dot_row, token,
-};
+use crate::ui::{camera_art, chevron_row, gr_mark, grouped_card, primary_button, token};
 
 pub fn camera_root(app: AppState) -> impl IntoElement {
-    // No navigation title: the design uses the camera art as the header.
+    // Each camera state supplies its own header.
     // The stack still pushes Software Update with a system back button.
     nav_page().header_visible(false).child(dynamic(move || {
         let status = app.status();
         match status {
-            Some(s) if s.camera.connection == ConnectionState::Connected => {
-                connected(app.clone(), s.camera.model).into_element()
-            }
+            Some(s) => connected(
+                app.clone(),
+                s.camera.model,
+                s.camera.connection == ConnectionState::Connected,
+            )
+            .into_element(),
             _ => empty_home(app.clone()).into_element(),
         }
     }))
 }
 
 fn empty_home(app: AppState) -> impl IntoElement {
-    view()
+    scroll()
         .flex_1()
-        .bg(move || token("grouped"))
-        .items_center()
-        .justify_center()
-        .px_8()
-        .gap_4()
-        .child(camera_art(CameraModel::Gr3, 236.0, true))
+        .bg(move || token("connection-background"))
         .child(
-            text(move || tr("home.title", &[]))
-                .text_size(px(22.0))
-                .font_weight(FontWeight::BOLD)
-                .text_center(),
-        )
-        .child(
-            text(move || tr("home.subtitle", &[]))
-                .text_size(px(15.0))
-                .text_color(move || theme().muted_foreground)
-                .text_center()
-                .max_w(px(300.0)),
-        )
-        .child(primary_button(tr("home.add", &[]), move || app.open_scan()))
-        .child(
-            view().h(px(48.0)).child(
-                text(move || tr("home.footnote", &[]))
-                    .text_size(px(13.0))
-                    .text_color(move || theme().muted_foreground)
-                    .text_center(),
-            ),
+            view()
+                .px_6()
+                .pt(px(72.0))
+                .gap_6()
+                .child(
+                    view()
+                        .gap_2()
+                        .child(
+                            view()
+                                .w(px(28.0))
+                                .h(px(3.0))
+                                .bg(move || token("connection-brand")),
+                        )
+                        .child(
+                            text("GRKit")
+                                .text_size(px(28.0))
+                                .font_weight(FontWeight::BOLD),
+                        )
+                        .child(
+                            text(tr("home.subtitle", &[]))
+                                .text_size(px(15.0))
+                                .line_height(px(22.0))
+                                .text_color(move || theme().muted_foreground),
+                        ),
+                )
+                .child(
+                    view()
+                        .rounded(px(10.0))
+                        .border_1()
+                        .border_color(move || token("connection-line"))
+                        .bg(move || token("connection-background"))
+                        .p_6()
+                        .gap_5()
+                        .child(view().items_center().py_4().child(camera_art(
+                            CameraModel::Gr3,
+                            180.0,
+                            false,
+                        )))
+                        .child(
+                            view()
+                                .gap_2()
+                                .child(
+                                    text(tr("home.title", &[]))
+                                        .text_size(px(22.0))
+                                        .font_weight(FontWeight::SEMIBOLD),
+                                )
+                                .child(
+                                    text(tr("connecting.bt", &[]))
+                                        .text_size(px(14.0))
+                                        .text_color(move || theme().muted_foreground),
+                                ),
+                        )
+                        .child(crate::ui::connection_button(
+                            tr("home.add", &[]),
+                            move || app.open_scan(),
+                        )),
+                )
+                .child(
+                    text(tr("home.footnote", &[]))
+                        .text_size(px(13.0))
+                        .text_color(move || theme().muted_foreground),
+                ),
         )
 }
 
-fn connected(app: AppState, model: CameraModel) -> impl IntoElement {
+fn connected(app: AppState, model: CameraModel, online: bool) -> impl IntoElement {
     let package = app.package();
     let up_to_date = package.as_ref().is_some_and(is_up_to_date);
-    // Art starts 84 pt from the screen top (below the status bar / safe area).
     scroll().flex_1().bg(move || token("grouped")).child(
         view()
-            .gap_5()
-            .pt(px(84.0))
-            .px_4()
+            .gap_4()
+            .pt(px(72.0))
+            .px_6()
             .pb_10()
             .child(
                 view()
-                    .items_center()
-                    .gap_3()
-                    .child(camera_art(model, 236.0, false))
-                    .child(status_dot_row(
-                        model.display_name(),
-                        tr("connected.status", &[]),
-                    )),
+                    .gap_2()
+                    .child(view().w(px(28.0)).h(px(3.0)).bg(move || token("tint")))
+                    .child(
+                        text("GRKit")
+                            .text_size(px(28.0))
+                            .font_weight(FontWeight::BOLD),
+                    ),
             )
-            .child(if up_to_date {
-                up_to_date_card(app.clone()).into_element()
+            .child(grouped_card(
+                view()
+                    .p_4()
+                    .gap_4()
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_4()
+                            .child(camera_art(model, 80.0, false))
+                            .child(
+                                view()
+                                    .flex_1()
+                                    .gap(px(4.0))
+                                    .child(
+                                        text(format!("RICOH {}", model.display_name()))
+                                            .text_size(px(20.0))
+                                            .font_weight(FontWeight::SEMIBOLD),
+                                    )
+                                    .child(
+                                        text(if online {
+                                            app.remembered()
+                                                .map(|r| r.last_ssid)
+                                                .unwrap_or_else(|| tr("connected.status", &[]))
+                                        } else {
+                                            tr("connected.offline", &[])
+                                        })
+                                        .text_size(px(15.0))
+                                        .text_color(move || theme().muted_foreground),
+                                    ),
+                            ),
+                    )
+                    .child(version_card(app.clone())),
+            ))
+            .child(if !online {
+                primary_button(tr("nearby.connect", &[]), move || app.start_connect())
+                    .into_element()
+            } else if up_to_date {
+                up_to_date_card(app).into_element()
             } else {
-                update_available_card(app.clone()).into_element()
-            })
-            .child(version_card(app)),
+                update_available_card(app).into_element()
+            }),
     )
 }
 
@@ -92,57 +165,47 @@ fn update_available_card(app: AppState) -> impl IntoElement {
         .and_then(|p| p.available)
         .unwrap_or_else(|| "1.7.0".into());
     grouped_card(
-        view().p_4().gap_3().child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap_3()
-                .role(AccessibilityRole::Button)
-                .label(format!("GRKit {version}"))
-                .on_press({
-                    let app = app.clone();
-                    move || app.open_software_update()
-                })
-                .child(gr_mark(48.0))
-                .child(
-                    view()
-                        .flex_1()
-                        .gap(px(2.0))
-                        .child(
-                            text(format!("GRKit {version}"))
-                                .text_size(px(17.0))
-                                .font_weight(FontWeight::SEMIBOLD),
-                        )
-                        .child(
-                            text(move || tr("connected.whats_new", &[]))
-                                .text_size(px(13.0))
-                                .text_color(move || theme().muted_foreground),
-                        ),
-                )
-                .child(
-                    view()
-                        .h(px(34.0))
-                        .px_4()
-                        .rounded(px(17.0))
-                        .items_center()
-                        .justify_center()
-                        .bg(move || theme().primary)
-                        .role(AccessibilityRole::Button)
-                        .label(tr("connected.update", &[]))
-                        .on_press({
-                            let app = app.clone();
-                            move || {
-                                app.begin_update(crate::domain::UpdateKind::Install);
-                            }
-                        })
-                        .child(
-                            text(move || tr("connected.update", &[]))
-                                .text_size(px(15.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(move || theme().primary_foreground),
-                        ),
-                ),
-        ),
+        view()
+            .p_4()
+            .gap_4()
+            .child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .role(AccessibilityRole::Button)
+                    .label(format!("GRKit {version}"))
+                    .active(|s| s.opacity(0.72))
+                    .on_press({
+                        let app = app.clone();
+                        move || app.open_software_update()
+                    })
+                    .child(gr_mark(48.0))
+                    .child(
+                        view()
+                            .flex_1()
+                            .gap(px(4.0))
+                            .child(
+                                text(format!("GRKit {version}"))
+                                    .text_size(px(17.0))
+                                    .font_weight(FontWeight::SEMIBOLD),
+                            )
+                            .child(
+                                text(tr("connected.whats_new", &[]))
+                                    .text_size(px(15.0))
+                                    .line_height(px(22.0))
+                                    .text_color(move || theme().muted_foreground),
+                            ),
+                    )
+                    .child(
+                        text("›")
+                            .text_size(px(24.0))
+                            .text_color(move || theme().muted_foreground),
+                    ),
+            )
+            .child(primary_button(tr("connected.update", &[]), move || {
+                app.begin_update(crate::domain::UpdateKind::Install)
+            })),
     )
 }
 
@@ -164,9 +227,28 @@ fn version_card(app: AppState) -> impl IntoElement {
         .as_ref()
         .map(|p| p.firmware.clone())
         .unwrap_or_default();
-    grouped_card(
-        view()
-            .child(info_row(tr("connected.grkit", &[]), grkit, false))
-            .child(info_row(tr("connected.firmware", &[]), firmware, true)),
-    )
+    view()
+        .flex_row()
+        .gap_2()
+        .child(version_tile(grkit, tr("connected.grkit", &[])))
+        .child(version_tile(firmware, tr("connected.firmware", &[])))
+}
+
+fn version_tile(value: String, label: String) -> impl IntoElement {
+    view()
+        .flex_1()
+        .gap(px(4.0))
+        .p_3()
+        .rounded(px(8.0))
+        .bg(move || theme().muted)
+        .child(
+            text(value)
+                .text_size(px(20.0))
+                .font_weight(FontWeight::SEMIBOLD),
+        )
+        .child(
+            text(label)
+                .text_size(px(13.0))
+                .text_color(move || theme().muted_foreground),
+        )
 }

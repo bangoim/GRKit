@@ -6,9 +6,19 @@
 //! - `ui`: shared phone chrome
 //! - `store`: app state and demo mode
 //! - `domain`: camera model, update flow, fake camera link
+//! - `platform`: Bluetooth / Wi-Fi bridges (iOS) or stubs
 //! - `strings`: English and Simplified Chinese copy
 
 #![allow(clippy::clone_on_copy)]
+
+/// Logs a connection step to stderr, which `devicectl --console` and Xcode
+/// show. NSH's logger keeps only warnings and errors in packaged builds, so
+/// `log::info!` lines would be lost.
+macro_rules! app_info {
+    ($($arg:tt)*) => {
+        eprintln!("GRKit {}", format_args!($($arg)*))
+    };
+}
 
 pub mod domain;
 mod pages;

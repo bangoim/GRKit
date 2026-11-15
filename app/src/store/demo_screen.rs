@@ -12,7 +12,9 @@ use std::{
 use nsh_base::alert_dialog;
 use nsh_core::prelude::*;
 
-use crate::domain::{CameraLink, FakeCamera, FakeConfig, UpdateError, UpdateKind, UpdatePhase};
+use crate::domain::{
+    CameraLink, FakeCamera, FakeConfig, UpdateError, UpdateKind, UpdatePhase, block_on_ready,
+};
 use crate::store::{AppState, Route, Sheet, Tab};
 use crate::strings::tr;
 
@@ -205,7 +207,7 @@ pub fn apply(app: AppState, screen: DemoScreen) {
                     .title(tr("roll.alert_title", &[("version", "1.6.1")]))
                     .description(tr("roll.alert_body", &[]))
                     .cancel("cancel", tr("roll.cancel", &[]))
-                    .destructive("rollback", tr("roll.confirm", &[]))
+                    .action("rollback", tr("roll.confirm", &[]))
                     .show()
                     .await;
             });
@@ -242,11 +244,11 @@ fn seed_connected_available(app: AppState) {
     app.camera.with(|slot| {
         let mut slot = slot.borrow_mut();
         let cam = slot.get_or_insert_with(|| FakeCamera::new(FakeConfig::default()));
-        let _ = cam.connect();
-        if let Ok(status) = cam.read_status() {
+        let _ = block_on_ready(cam.connect());
+        if let Ok(status) = block_on_ready(cam.read_status()) {
             app.status.set(Some(status));
         }
-        if let Ok(package) = cam.read_package() {
+        if let Ok(package) = block_on_ready(cam.read_package()) {
             app.package.set(Some(package));
         }
     });
@@ -262,13 +264,13 @@ fn seed_connected_up_to_date(app: AppState) {
             ..FakeConfig::default()
         };
         let mut cam = FakeCamera::new(cfg);
-        let _ = cam.connect();
+        let _ = block_on_ready(cam.connect());
         // Mark package as current with a roll-back target.
         cam.set_up_to_date("1.7.0", "1.6.1");
-        if let Ok(status) = cam.read_status() {
+        if let Ok(status) = block_on_ready(cam.read_status()) {
             app.status.set(Some(status));
         }
-        if let Ok(package) = cam.read_package() {
+        if let Ok(package) = block_on_ready(cam.read_package()) {
             app.package.set(Some(package));
         }
         *slot = Some(cam);
@@ -314,7 +316,7 @@ pub fn key_text(screen: DemoScreen) -> &'static str {
         DemoScreen::A1 => "Add Your Camera",
         DemoScreen::A2 => "Connect",
         DemoScreen::A3 => "Add a Camera",
-        DemoScreen::A4 => "Connecting to GR III",
+        DemoScreen::A4 => "Connecting to RICOH GR III",
         DemoScreen::A5 => "What's New",
         DemoScreen::A6 => "GRKit Is Up to Date",
         DemoScreen::A7 => "More from the Maker",

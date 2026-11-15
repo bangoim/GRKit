@@ -11,14 +11,20 @@ home.title:
   en: Add Your Camera
   zh-CN: 添加你的相机
 home.subtitle:
-  en: Update GRKit over Wi-Fi.
-  zh-CN: 通过 Wi-Fi 更新 GRKit。
+  en: Connect your camera. Manage GRKit.
+  zh-CN: 连接相机，管理 GRKit。
 home.add:
   en: Add Camera
   zh-CN: 添加相机
 home.footnote:
   en: Needs GRKit 1.7.0 or later on the camera.
   zh-CN: 相机上需要 GRKit 1.7.0 或更高版本。
+error.old_title:
+  en: GRKit Needs an Update
+  zh-CN: 需要更新 GRKit
+error.old_body:
+  en: Install GRKit 1.7.0 or later on the card first.
+  zh-CN: 请先在卡上安装 GRKit 1.7.0 或更高版本。
 
 nearby.title_suffix:
   en: ""
@@ -27,8 +33,14 @@ nearby.powered_on:
   en: Powered on
   zh-CN: 已开机
 nearby.hint:
-  en: "First time with this camera? On the camera, select Bluetooth Setting → Pairing → Execute Pairing"
-  zh-CN: 首次连接？请在相机上选择“蓝牙设置 → 配对 → 执行配对”
+  en: "First time with this camera? On the camera, select Bluetooth Setting → Action Mode On → Pairing → Execute Pairing"
+  zh-CN: 首次连接？请在相机上选择“蓝牙设置 → 打开动作模式 → 配对 → 执行配对”
+pair.hint_gr3:
+  en: "First time with this camera? On the camera, select Bluetooth Setting → Action Mode On → Pairing → Execute Pairing"
+  zh-CN: 首次连接？请在相机上选择“蓝牙设置 → 打开动作模式 → 配对 → 执行配对”
+pair.hint_gr4:
+  en: "First time with this camera? On the camera, select Wireless Communication → Action Mode On → Pairing → Execute Pairing"
+  zh-CN: 首次连接？请在相机上选择“无线通信 → 打开动作模式 → 配对 → 执行配对”
 nearby.connect:
   en: Connect
   zh-CN: 连接
@@ -45,9 +57,12 @@ scan.subtitle:
 scan.looking:
   en: Looking for cameras
   zh-CN: 正在查找相机
+scan.nearby_off:
+  en: Nearby
+  zh-CN: 在附近
 scan.hint:
-  en: "First time? On the camera: Bluetooth Setting → Pairing → Execute Pairing"
-  zh-CN: 首次连接？在相机上：蓝牙设置 → 配对 → 执行配对
+  en: "First time? On the camera: Bluetooth Setting → Action Mode On → Pairing → Execute Pairing"
+  zh-CN: 首次连接？在相机上：蓝牙设置 → 打开动作模式 → 配对 → 执行配对
 scan.close:
   en: Close
   zh-CN: 关闭
@@ -74,6 +89,9 @@ connecting.version:
 connected.status:
   en: Connected
   zh-CN: 已连接
+connected.offline:
+  en: Not Connected
+  zh-CN: 未连接
 connected.whats_new:
   en: What's New
   zh-CN: 新功能
@@ -228,6 +246,30 @@ error.lost_title:
 error.lost_body:
   en: The link dropped. Nothing changed on the camera.
   zh-CN: 连接中断。相机未改动。
+error.pair_title:
+  en: Pairing Needed
+  zh-CN: 需要配对
+error.pair_body:
+  en: Complete pairing on the camera, then try again.
+  zh-CN: 请先在相机上完成配对，然后重试。
+error.wifi_title:
+  en: Could Not Join Wi-Fi
+  zh-CN: 无法加入 Wi-Fi
+error.wifi_body:
+  en: Allow the network prompt, keep the camera nearby, then try again.
+  zh-CN: 请允许系统网络提示，保持相机在附近，然后重试。
+error.card_ready_title:
+  en: Camera Not Ready
+  zh-CN: 相机未就绪
+error.card_ready_body:
+  en: The memory card is still starting. Try again in a moment.
+  zh-CN: 存储卡仍在启动，请稍后再试。
+error.bt_title:
+  en: Bluetooth Unavailable
+  zh-CN: 蓝牙不可用
+error.bt_body:
+  en: Turn on Bluetooth and allow access for GRKit.
+  zh-CN: 请打开蓝牙并允许 GRKit 使用。
 error.try_again:
   en: Try Again
   zh-CN: 重试
@@ -265,3 +307,7 @@ settings.gr_snap_desc:
 settings.view:
   en: View
   zh-CN: 查看
+
+connecting.cancel:
+  en: Cancel
+  zh-CN: 取消

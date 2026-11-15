@@ -1,8 +1,9 @@
 # GRKit app
 
-Phone app that updates GRKit on a RICOH GR camera over the camera's Wi-Fi.
-Version 1 ships the screens and a demo mode with a fake camera; a later task
-adds the real link.
+Phone app for connecting to a RICOH GR camera and managing GRKit. The iOS link
+discovers cameras over BLE, joins Wi-Fi, and reads GRKit status. Update screens
+currently use a fake transport. See [camera connection](docs/connection.md) for
+ownership, cancellation, GR Snap alignment, and hardware verification.
 
 ## Requirements
 
@@ -72,6 +73,37 @@ cargo run -- --demo-screen C4
 | C5 | Not confirmed |
 
 Unknown ids fall back to the normal demo home.
+
+### Development camera URL (no Bluetooth)
+
+When demo mode is off and `GRKIT_CAMERA_URL` is set, Add Camera skips Bluetooth and
+Wi-Fi and talks HTTP to that base URL (status poll with 503 retry, then package).
+Useful on the iOS simulator, which has no Bluetooth:
+
+```sh
+# Run a local GRKit HTTP service, then:
+GRKIT_CAMERA_URL=http://127.0.0.1:8080 nsh run --target ios-simulator
+```
+
+Without the variable, behavior is unchanged. On a build where Bluetooth is
+unavailable (simulator Unsupported), the Camera tab still shows A1; Add Camera
+shows a Bluetooth unavailable message instead of an endless scan.
+
+### Device build (signing)
+
+`GRKit.xcodeproj` wraps `nsh package --target ios` so Xcode can sign for a device:
+
+```sh
+cd app
+xcodebuild -project GRKit.xcodeproj -scheme GRKit \
+  -destination 'generic/platform=iOS' -allowProvisioningUpdates build
+```
+
+The shell script `scripts/xcode-build.sh` is the only build phase. Entitlements
+live only in `ios/GRKit.entitlements` (HotspotConfiguration), which Xcode signs
+into device builds. `nsh.json` has no `ios.entitlements`: `nsh package` signs
+them into the ad hoc simulator build, and the simulator then refuses to launch
+the app.
 
 ## Layout
 

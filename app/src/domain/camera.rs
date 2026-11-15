@@ -1,7 +1,10 @@
 //! A camera the app can update, and how far a connection has gone.
 
+use serde::{Deserialize, Serialize};
+
 /// Models the app can show and update.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum CameraModel {
     Gr3,
     Gr3x,
@@ -15,6 +18,14 @@ impl CameraModel {
             Self::Gr3 => "GR III",
             Self::Gr3x => "GR IIIx",
             Self::Gr4 => "GR IV",
+        }
+    }
+
+    /// First-time pairing menu path on the camera.
+    pub fn pairing_hint_key(self) -> &'static str {
+        match self {
+            Self::Gr3 | Self::Gr3x => "pair.hint_gr3",
+            Self::Gr4 => "pair.hint_gr4",
         }
     }
 }

@@ -1,4 +1,5 @@
 //! Runs the app on the desktop backend (`cargo run`).
+//! iOS packages use `nsh run` / `nsh package`; this binary is a macOS host only.
 
 #[cfg(target_os = "macos")]
 fn main() -> impl std::process::Termination {
@@ -15,4 +16,6 @@ fn main() -> impl std::process::Termination {
 }
 
 #[cfg(not(target_os = "macos"))]
-compile_error!("Run this binary on macOS; use `nsh run --target ios` for iOS.");
+fn main() {
+    // Device / simulator packages are built by `nsh package`, not this binary.
+}

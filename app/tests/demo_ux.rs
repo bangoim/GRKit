@@ -113,3 +113,24 @@ fn demo_card_full_error() {
     app.press("Close").unwrap();
     app.wait_for_gone("Card Is Full", WAIT).unwrap();
 }
+
+#[test]
+fn cancelling_connect_can_start_a_fresh_attempt() {
+    let _guard = lock_demo();
+    set_demo(None);
+    unsafe {
+        env::set_var("GRKIT_DEMO_SCREEN", "A4");
+    }
+    let mut app = start_phone();
+    let shown = app.wait_for("Connecting to RICOH GR III");
+    unsafe {
+        env::remove_var("GRKIT_DEMO_SCREEN");
+    }
+    shown.unwrap();
+    app.press("Cancel").unwrap();
+    app.wait_for_gone("Connecting to RICOH GR III", WAIT)
+        .unwrap();
+    app.press("Add Camera").unwrap();
+    app.press("Connect").unwrap();
+    app.wait_for_within("Connected", WAIT).unwrap();
+}

@@ -41,8 +41,9 @@ pub fn software_page(app: AppState, on_dismiss: impl Fn() + 'static) -> impl Int
                     scroll().flex_1().child(
                         view()
                             .gap_5()
-                            .p_4()
-                            .pb_10()
+                            .px_6()
+                            .pt_4()
+                            .pb_8()
                             .child(header_card(
                                 if up_to_date {
                                     installed.clone()
@@ -71,6 +72,7 @@ pub fn software_page(app: AppState, on_dismiss: impl Fn() + 'static) -> impl Int
                                             view().px_4().py_3().child(
                                                 text(move || tr("software.looks_stay", &[]))
                                                     .text_size(px(13.0))
+                                                    .line_height(px(18.0))
                                                     .text_color(move || theme().muted_foreground),
                                             ),
                                         ),
@@ -102,13 +104,14 @@ pub fn software_page(app: AppState, on_dismiss: impl Fn() + 'static) -> impl Int
                                                         &[("version", &version)],
                                                     ))
                                                     .text_size(px(17.0))
-                                                    .text_color(move || theme().destructive),
+                                                    .text_color(move || token("link")),
                                                 ),
                                         )
                                         .child(
                                             view().px_4().pb_3().child(
                                                 text(move || tr("software.roll_footnote", &[]))
                                                     .text_size(px(13.0))
+                                                    .line_height(px(18.0))
                                                     .text_color(move || theme().muted_foreground),
                                             ),
                                         ),
@@ -118,8 +121,8 @@ pub fn software_page(app: AppState, on_dismiss: impl Fn() + 'static) -> impl Int
                 )
                 .child((!up_to_date).then(|| {
                     view()
-                        .px_4()
-                        .pb_8()
+                        .px_6()
+                        .pb_4()
                         .gap_2()
                         .child(primary_button(tr("software.update_now", &[]), {
                             let app = app.clone();
@@ -128,6 +131,7 @@ pub fn software_page(app: AppState, on_dismiss: impl Fn() + 'static) -> impl Int
                         .child(
                             text(move || tr("software.confirm_note", &[]))
                                 .text_size(px(13.0))
+                                .line_height(px(18.0))
                                 .text_color(move || theme().muted_foreground)
                                 .text_center(),
                         )
@@ -150,11 +154,11 @@ fn header_card(
                     .flex_row()
                     .items_center()
                     .gap_3()
-                    .child(gr_mark(60.0))
+                    .child(gr_mark(48.0))
                     .child(
                         view()
                             .flex_1()
-                            .gap(px(2.0))
+                            .gap(px(4.0))
                             .child(
                                 text(format!("GRKit {version}"))
                                     .text_size(px(20.0))
@@ -173,12 +177,14 @@ fn header_card(
                     .child(
                         text(notes)
                             .text_size(px(15.0))
+                            .line_height(px(22.0))
                             .text_color(move || theme().foreground),
                     )
                     .child(
                         text(move || tr("software.learn_more", &[]))
                             .text_size(px(15.0))
-                            .text_color(move || theme().muted_foreground),
+                            .line_height(px(22.0))
+                            .text_color(move || token("link")),
                     )
             })),
     )
@@ -190,7 +196,7 @@ fn confirm_rollback(app: AppState, version: String) {
             .title(tr("roll.alert_title", &[("version", &version)]))
             .description(tr("roll.alert_body", &[]))
             .cancel("cancel", tr("roll.cancel", &[]))
-            .destructive("rollback", tr("roll.confirm", &[]))
+            .action("rollback", tr("roll.confirm", &[]))
             .show()
             .await;
         if matches!(answer, Ok(r) if r.action.as_deref() == Some("rollback")) {

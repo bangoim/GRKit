@@ -14,9 +14,9 @@ pub fn settings_root() -> impl IntoElement {
         .child(
             scroll().flex_1().bg(move || token("grouped")).child(
                 view()
-                    .gap_6()
+                    .gap_8()
                     .pt_4()
-                    .px_4()
+                    .px_6()
                     .pb_12()
                     .child(
                         view()
@@ -102,7 +102,7 @@ fn gr_snap_row() -> impl IntoElement {
         .child(
             view()
                 .flex_1()
-                .gap(px(2.0))
+                .gap(px(4.0))
                 .child(
                     text(move || tr("settings.gr_snap_name", &[]))
                         .text_size(px(17.0))
@@ -110,21 +110,22 @@ fn gr_snap_row() -> impl IntoElement {
                 )
                 .child(
                     text(move || tr("settings.gr_snap_desc", &[]))
-                        .text_size(px(13.0))
-                        .text_color(move || theme().muted_foreground)
-                        .number_of_lines(2),
+                        .text_size(px(15.0))
+                        .line_height(px(21.0))
+                        .text_color(move || theme().muted_foreground),
                 ),
         )
         .child(
             view()
-                .h(px(32.0))
+                .min_h(px(44.0))
                 .px_3()
-                .rounded(px(16.0))
+                .rounded(px(8.0))
                 .items_center()
                 .justify_center()
                 .bg(move || theme().muted)
                 .role(AccessibilityRole::Button)
                 .label(tr("settings.view", &[]))
+                .active(|s| s.opacity(0.72))
                 .on_press(|| {
                     spawn(async move {
                         let _ = open_url(GR_SNAP_URL).await;
@@ -133,7 +134,8 @@ fn gr_snap_row() -> impl IntoElement {
                 .child(
                     text(move || tr("settings.view", &[]))
                         .text_size(px(15.0))
-                        .font_weight(FontWeight::MEDIUM),
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(move || token("link")),
                 ),
         )
 }

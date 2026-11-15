@@ -9,7 +9,23 @@
   "appearance": "system",
   "capabilities": {
     "openUrl": {
-      "schemes": ["https", "itms-apps"]
+      "schemes": [
+        "https",
+        "itms-apps"
+      ]
+    }
+  },
+  "ios": {
+    "infoPlist": {
+      "MinimumOSVersion": "17.0",
+      "NSBluetoothAlwaysUsageDescription": "GRKit uses Bluetooth to find your camera and turn on its Wi-Fi.",
+      "NSLocalNetworkUsageDescription": "GRKit talks to the camera over its Wi-Fi network.",
+      "NSAccessorySetupKitSupports": [
+        "WiFi"
+      ],
+      "NSAppTransportSecurity": {
+        "NSAllowsLocalNetworking": true
+      }
     }
   }
 }

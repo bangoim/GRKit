@@ -276,7 +276,7 @@ impl CameraLink for FakeCamera {
         }
     }
 
-    fn connect(&mut self) -> Result<CameraStatus, LinkError> {
+    async fn connect(&mut self) -> Result<CameraStatus, LinkError> {
         if self.camera.connection == ConnectionState::Disconnected
             && matches!(
                 self.flow.phase(),
@@ -293,7 +293,7 @@ impl CameraLink for FakeCamera {
         })
     }
 
-    fn read_status(&self) -> Result<CameraStatus, LinkError> {
+    async fn read_status(&self) -> Result<CameraStatus, LinkError> {
         if self.camera.connection == ConnectionState::Disconnected {
             return Err(LinkError::ConnectionLost);
         }
@@ -303,14 +303,14 @@ impl CameraLink for FakeCamera {
         })
     }
 
-    fn read_package(&self) -> Result<PackageInfo, LinkError> {
+    async fn read_package(&self) -> Result<PackageInfo, LinkError> {
         if self.camera.connection != ConnectionState::Connected {
             return Err(LinkError::NotNearby);
         }
         Ok(self.package.clone())
     }
 
-    fn send_update(&mut self, kind: UpdateKind) -> Result<(), LinkError> {
+    async fn send_update(&mut self, kind: UpdateKind) -> Result<(), LinkError> {
         if self.camera.connection != ConnectionState::Connected {
             return Err(LinkError::NotNearby);
         }
@@ -334,7 +334,7 @@ impl CameraLink for FakeCamera {
         Ok(())
     }
 
-    fn poll_update(&mut self) -> Result<UpdatePoll, LinkError> {
+    async fn poll_update(&mut self) -> Result<UpdatePoll, LinkError> {
         self.tick();
         Ok(match self.flow.phase().clone() {
             UpdatePhase::Sending { progress, .. } => UpdatePoll::Sending { progress },
@@ -346,7 +346,7 @@ impl CameraLink for FakeCamera {
         })
     }
 
-    fn cancel(&mut self) -> Result<(), LinkError> {
+    async fn cancel(&mut self) -> Result<(), LinkError> {
         if matches!(
             self.flow.phase(),
             UpdatePhase::Installed { .. } | UpdatePhase::Idle
@@ -365,10 +365,11 @@ impl CameraLink for FakeCamera {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::block_on_ready;
 
     fn connected_demo() -> FakeCamera {
         let mut cam = FakeCamera::demo();
-        cam.connect().unwrap();
+        block_on_ready(cam.connect()).unwrap();
         cam
     }
 
@@ -376,11 +377,11 @@ mod tests {
     fn happy_path_install() {
         let mut cam = connected_demo();
         let before = cam.live_version().to_owned();
-        cam.send_update(UpdateKind::Install).unwrap();
+        block_on_ready(cam.send_update(UpdateKind::Install)).unwrap();
         let mut saw_waiting = false;
         let mut installed = None;
         for _ in 0..40 {
-            match cam.poll_update().unwrap() {
+            match block_on_ready(cam.poll_update()).unwrap() {
                 UpdatePoll::WaitingConfirm => saw_waiting = true,
                 UpdatePoll::Installed { version } => {
                     installed = Some(version);
@@ -399,17 +400,21 @@ mod tests {
     #[test]
     fn rollback_after_install() {
         let mut cam = connected_demo();
-        cam.send_update(UpdateKind::Install).unwrap();
+        block_on_ready(cam.send_update(UpdateKind::Install)).unwrap();
         for _ in 0..40 {
-            if matches!(cam.poll_update().unwrap(), UpdatePoll::Installed { .. }) {
+            if matches!(
+                block_on_ready(cam.poll_update()).unwrap(),
+                UpdatePoll::Installed { .. }
+            ) {
                 break;
             }
         }
         cam.flow.reset();
-        cam.send_update(UpdateKind::Rollback).unwrap();
+        block_on_ready(cam.send_update(UpdateKind::Rollback)).unwrap();
         let mut version = None;
         for _ in 0..40 {
-            if let UpdatePoll::Installed { version: v } = cam.poll_update().unwrap() {
+            if let UpdatePoll::Installed { version: v } = block_on_ready(cam.poll_update()).unwrap()
+            {
                 version = Some(v);
                 break;
             }
@@ -421,12 +426,12 @@ mod tests {
     #[test]
     fn card_full_leaves_package_unchanged() {
         let mut cam = FakeCamera::with_fail(DemoFail::CardFull);
-        cam.connect().unwrap();
+        block_on_ready(cam.connect()).unwrap();
         let before = cam.live_version().to_owned();
-        cam.send_update(UpdateKind::Install).unwrap();
+        block_on_ready(cam.send_update(UpdateKind::Install)).unwrap();
         let mut err = None;
         for _ in 0..10 {
-            if let UpdatePoll::Failed(e) = cam.poll_update().unwrap() {
+            if let UpdatePoll::Failed(e) = block_on_ready(cam.poll_update()).unwrap() {
                 err = Some(e);
                 break;
             }
@@ -443,12 +448,12 @@ mod tests {
     #[test]
     fn refused_leaves_package_unchanged() {
         let mut cam = FakeCamera::with_fail(DemoFail::Refused);
-        cam.connect().unwrap();
+        block_on_ready(cam.connect()).unwrap();
         let before = cam.live_version().to_owned();
-        cam.send_update(UpdateKind::Install).unwrap();
+        block_on_ready(cam.send_update(UpdateKind::Install)).unwrap();
         let mut err = None;
         for _ in 0..10 {
-            if let UpdatePoll::Failed(e) = cam.poll_update().unwrap() {
+            if let UpdatePoll::Failed(e) = block_on_ready(cam.poll_update()).unwrap() {
                 err = Some(e);
                 break;
             }
@@ -460,12 +465,12 @@ mod tests {
     #[test]
     fn not_confirmed_leaves_package_unchanged() {
         let mut cam = FakeCamera::with_fail(DemoFail::NotConfirmed);
-        cam.connect().unwrap();
+        block_on_ready(cam.connect()).unwrap();
         let before = cam.live_version().to_owned();
-        cam.send_update(UpdateKind::Install).unwrap();
+        block_on_ready(cam.send_update(UpdateKind::Install)).unwrap();
         let mut err = None;
         for _ in 0..20 {
-            if let UpdatePoll::Failed(e) = cam.poll_update().unwrap() {
+            if let UpdatePoll::Failed(e) = block_on_ready(cam.poll_update()).unwrap() {
                 err = Some(e);
                 break;
             }
@@ -477,12 +482,12 @@ mod tests {
     #[test]
     fn connection_lost_leaves_package_unchanged() {
         let mut cam = FakeCamera::with_fail(DemoFail::ConnectionLost);
-        cam.connect().unwrap();
+        block_on_ready(cam.connect()).unwrap();
         let before = cam.live_version().to_owned();
-        cam.send_update(UpdateKind::Install).unwrap();
+        block_on_ready(cam.send_update(UpdateKind::Install)).unwrap();
         let mut err = None;
         for _ in 0..10 {
-            if let UpdatePoll::Failed(e) = cam.poll_update().unwrap() {
+            if let UpdatePoll::Failed(e) = block_on_ready(cam.poll_update()).unwrap() {
                 err = Some(e);
                 break;
             }

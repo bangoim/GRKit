@@ -22,12 +22,12 @@ pub fn token(name: &'static str) -> AdaptiveColor {
     theme().color(name).unwrap_or_else(|| theme().background)
 }
 
-/// Floating sheet card fill: light `rgba(250,250,252,0.96)`, matching dark.
+/// Floating sheet surface, with an opaque fill in light mode.
 pub fn sheet_surface() -> Rgba {
     if dark() {
-        rgba(0x2C2C2EF5)
+        rgba(0x242424FF)
     } else {
-        rgba(0xFAFAFCF5)
+        rgba(0xFFFFFFFF)
     }
 }
 
@@ -53,24 +53,26 @@ pub fn camera_art(model: CameraModel, width: f32, faded: bool) -> impl IntoEleme
 pub fn primary_button(title: impl Into<String>, on_press: impl Fn() + 'static) -> impl IntoElement {
     let title = title.into();
     view()
-        .h(px(50.0))
+        .min_h(px(50.0))
+        .py_3()
         .px_8()
-        .rounded(px(25.0))
+        .rounded(px(8.0))
         .items_center()
         .justify_center()
-        .bg(move || theme().primary)
+        .bg(move || token("button"))
         .role(AccessibilityRole::Button)
         .label(title.clone())
         .on_press(on_press)
+        .active(|s| s.opacity(0.72))
         .child(
             text(title)
                 .text_size(px(17.0))
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(move || theme().primary_foreground),
+                .text_color(move || token("button-foreground")),
         )
 }
 
-/// Full-width primary CTA inside a floating sheet (52×radius 26).
+/// Full-width primary action inside a sheet.
 pub fn sheet_primary_button(
     title: impl Into<String>,
     on_press: impl Fn() + 'static,
@@ -78,19 +80,21 @@ pub fn sheet_primary_button(
     let title = title.into();
     view()
         .w_full()
-        .h(px(52.0))
-        .rounded(px(26.0))
+        .min_h(px(50.0))
+        .py_3()
+        .rounded(px(8.0))
         .items_center()
         .justify_center()
-        .bg(move || theme().primary)
+        .bg(move || token("button"))
         .role(AccessibilityRole::Button)
         .label(title.clone())
         .on_press(on_press)
+        .active(|s| s.opacity(0.72))
         .child(
             text(title)
                 .text_size(px(17.0))
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(move || theme().primary_foreground),
+                .text_color(move || token("button-foreground")),
         )
 }
 
@@ -107,10 +111,12 @@ pub fn secondary_button(
         .role(AccessibilityRole::Button)
         .label(title.clone())
         .on_press(on_press)
+        .active(|s| s.opacity(0.72))
         .child(
             text(title)
                 .text_size(px(15.0))
-                .text_color(move || theme().muted_foreground),
+                .line_height(px(22.0))
+                .text_color(move || token("link")),
         )
 }
 
@@ -124,6 +130,7 @@ pub fn close_chip(on_press: impl Fn() + 'static) -> impl IntoElement {
         .role(AccessibilityRole::Button)
         .label(tr("scan.close", &[]))
         .on_press(on_press)
+        .active(|s| s.opacity(0.72))
         .child(
             text("✕")
                 .text_size(px(17.0))
@@ -133,14 +140,17 @@ pub fn close_chip(on_press: impl Fn() + 'static) -> impl IntoElement {
 
 pub fn section_title(title: impl Into<String>) -> impl IntoElement {
     text(title.into())
-        .text_size(px(18.0))
+        .text_size(px(15.0))
+        .line_height(px(22.0))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(move || theme().muted_foreground)
 }
 
 pub fn grouped_card(child: impl IntoElement) -> impl IntoElement {
     view()
-        .rounded(px(20.0))
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(move || theme().border)
         .overflow_hidden()
         .bg(move || theme().card)
         .child(child)
@@ -184,16 +194,17 @@ pub fn chevron_row(
         .flex_row()
         .items_center()
         .gap_3()
-        .min_h(px(52.0))
+        .min_h(px(68.0))
+        .py_3()
         .px_4()
         .role(AccessibilityRole::Button)
         .label(label)
         .on_press(on_press)
-        .active(|st| st.bg(move || theme().accent))
+        .active(|s| s.opacity(0.72).bg(move || theme().accent))
         .child(
             view()
                 .flex_1()
-                .gap(px(2.0))
+                .gap(px(4.0))
                 .child(
                     text(title.clone())
                         .text_size(px(17.0))
@@ -202,6 +213,7 @@ pub fn chevron_row(
                 .child(subtitle.map(|s| {
                     text(s)
                         .text_size(px(15.0))
+                        .line_height(px(22.0))
                         .text_color(move || theme().muted_foreground)
                 })),
         )
@@ -209,34 +221,6 @@ pub fn chevron_row(
             text("›")
                 .text_size(px(22.0))
                 .text_color(move || theme().muted_foreground),
-        )
-}
-
-pub fn status_dot_row(title: impl Into<String>, status: impl Into<String>) -> impl IntoElement {
-    view()
-        .items_center()
-        .gap(px(6.0))
-        .child(
-            text(title.into())
-                .text_size(px(28.0))
-                .font_weight(FontWeight::BOLD),
-        )
-        .child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .child(
-                    view()
-                        .size(px(7.0))
-                        .rounded_full()
-                        .bg(move || token("success")),
-                )
-                .child(
-                    text(status.into())
-                        .text_size(px(15.0))
-                        .text_color(move || theme().muted_foreground),
-                ),
         )
 }
 
@@ -292,7 +276,7 @@ fn step_icon(state: StepState) -> impl IntoElement {
                 text("✓")
                     .text_size(px(12.0))
                     .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(0xffffff)),
+                    .text_color(move || token("button-foreground")),
             )
             .into_element(),
         // Filled ring: outer stroke + solid center (spinner alternative).
@@ -323,62 +307,99 @@ fn step_icon(state: StepState) -> impl IntoElement {
 pub fn sheet_shell(
     title: impl Into<String>,
     subtitle: Option<String>,
+    hero: Option<CameraModel>,
     show_close: bool,
     on_close: impl Fn() + 'static,
     body: impl IntoElement,
 ) -> impl IntoElement {
     let title = title.into();
     view()
+        .relative()
         .flex_col()
         .w_full()
         .gap_5()
-        .pt(px(14.0))
-        .px(px(20.0))
-        .pb(px(22.0))
+        .pt(px(8.0))
+        .px(px(24.0))
+        .pb_safe_area_plus(px(8.0))
         .child(
             view()
-                .flex_row()
-                .items_start()
-                .child(view().w(px(44.0)))
-                .child(
-                    view()
-                        .flex_1()
-                        .items_center()
-                        .gap(px(4.0))
-                        .pt_2()
-                        .child(
-                            text(title)
-                                .text_size(px(22.0))
-                                .font_weight(FontWeight::BOLD)
-                                .text_center(),
-                        )
-                        .child(subtitle.map(|s| {
-                            text(s)
-                                .text_size(px(15.0))
-                                .text_color(move || theme().muted_foreground)
-                                .text_center()
-                        })),
-                )
-                .child(if show_close {
-                    close_chip(on_close).into_element()
-                } else {
-                    view().w(px(44.0)).into_element()
-                }),
+                .self_center()
+                .w(px(36.0))
+                .h(px(5.0))
+                .rounded_full()
+                .bg(rgb(0xD1D1D6)),
         )
+        .child(hero.map(|model| {
+            view()
+                .items_center()
+                .pt_4()
+                .child(camera_art(model, 140.0, false))
+        }))
+        .child(
+            view()
+                .gap(px(6.0))
+                .pt_2()
+                .child(
+                    text(title)
+                        .text_size(px(22.0))
+                        .font_weight(FontWeight::BOLD),
+                )
+                .child(subtitle.map(|s| {
+                    text(s)
+                        .text_size(px(15.0))
+                        .line_height(px(22.0))
+                        .text_color(move || theme().muted_foreground)
+                })),
+        )
+        .child(show_close.then(|| {
+            view()
+                .absolute()
+                .right(px(14.0))
+                .top(px(22.0))
+                .child(close_chip(on_close))
+        }))
         .child(body)
 }
 
 pub fn gr_mark(size: f32) -> impl IntoElement {
     view()
         .size(px(size))
-        .rounded(px(size * 0.25))
+        .rounded(px(8.0))
         .items_center()
         .justify_center()
-        .bg(move || theme().primary)
+        .bg(move || token("button"))
         .child(
             text("GR")
                 .text_size(px(size * 0.33))
                 .font_weight(FontWeight::BOLD)
-                .text_color(move || theme().primary_foreground),
+                .text_color(move || token("button-foreground")),
         )
+}
+
+/// Controls scoped to the connection flow.
+pub fn connection_button(title: String, on_press: impl Fn() + 'static) -> impl IntoElement {
+    view()
+        .w_full()
+        .min_h(px(50.0))
+        .py_3()
+        .rounded(px(8.0))
+        .items_center()
+        .justify_center()
+        .bg(move || token("connection-accent"))
+        .role(AccessibilityRole::Button)
+        .label(title.clone())
+        .on_press(on_press)
+        .active(|s| s.opacity(0.72))
+        .child(
+            text(title)
+                .text_size(px(17.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(move || token("connection-accent-foreground")),
+        )
+}
+
+pub fn connection_icon(path: &'static str) -> impl IntoElement {
+    svg(nsh_core::element::ImageSrc::svg_markup(&format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="{path}"/></svg>"#
+    ))).size(px(20.0))
 }
