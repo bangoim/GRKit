@@ -54,7 +54,7 @@ fn demo_add_camera_update_confirm_restart_installed() {
         .unwrap();
     app.wait_for_within("Confirm on the Camera", WAIT).unwrap();
     app.wait_for_within("Restart the Camera", WAIT).unwrap();
-    app.press("Done").unwrap();
+    app.press("Check Installed Version").unwrap();
     app.wait_for_within("GRKit 1.7.0 Is Installed", WAIT)
         .unwrap();
     app.press("Done").unwrap();
@@ -72,7 +72,7 @@ fn demo_roll_back() {
     app.wait_for_within("Update", WAIT).unwrap();
     app.press("Update").unwrap();
     app.wait_for_within("Restart the Camera", WAIT).unwrap();
-    app.press("Done").unwrap();
+    app.press("Check Installed Version").unwrap();
     app.wait_for_within("GRKit 1.7.0 Is Installed", WAIT)
         .unwrap();
     app.press("Done").unwrap();
@@ -93,8 +93,8 @@ fn demo_roll_back() {
     app.wait_for_within("Confirm Roll Back on the Camera", WAIT)
         .unwrap();
     app.wait_for_within("Restart the Camera", WAIT).unwrap();
-    app.press("Done").unwrap();
-    app.wait_for_within("GRKit 1.6.1 Is Installed", WAIT)
+    app.press("Check Installed Version").unwrap();
+    app.wait_for_within("GRKit 1.6.1 Is Restored", WAIT)
         .unwrap();
 }
 

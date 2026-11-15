@@ -3,6 +3,7 @@
 //! Reactive fields use NSH `Signal`s so the UI updates when they change.
 
 mod demo_screen;
+mod update;
 
 pub use demo_screen::{
     DEMO_SCREEN_IDS, DemoScreen, demo_screen_from_env, key_text, parse_demo_screen,
@@ -70,6 +71,7 @@ pub struct AppState {
     pub(crate) package: Signal<Option<PackageInfo>>,
     pub(crate) phase: Signal<UpdatePhase>,
     pub(crate) confirm_deadline: Signal<Option<Instant>>,
+    confirm_tick: Signal<u64>,
     connect_started: Signal<Option<Instant>>,
     /// When true, the ticker does not advance connecting / update sheets.
     frozen: Signal<bool>,
@@ -91,6 +93,13 @@ pub struct AppState {
     /// `spawn` ends with the owner it was made under, and a sheet's owner is
     /// disposed as soon as the sheet changes.
     root: Owner,
+    update_busy: Signal<bool>,
+    update_cancel: Signal<bool>,
+    update_reconnect: Signal<bool>,
+    update_kind: Signal<UpdateKind>,
+    release_busy: Signal<bool>,
+    release_error: Signal<Option<String>>,
+    release: Stored<RefCell<Option<platform::release::Release>>>,
 }
 
 impl AppState {
@@ -116,6 +125,13 @@ impl AppState {
         };
         let app = Self {
             demo,
+            update_busy: signal(false),
+            update_cancel: signal(false),
+            update_reconnect: signal(false),
+            update_kind: signal(UpdateKind::Install),
+            release_busy: signal(false),
+            release_error: signal(None),
+            release: stored(RefCell::new(None)),
             tab: signal(Tab::Camera),
             stacks: signal([Vec::new(), Vec::new()]),
             sheet: signal(None),
@@ -123,6 +139,7 @@ impl AppState {
             package: signal(None),
             phase: signal(UpdatePhase::Idle),
             confirm_deadline: signal(None),
+            confirm_tick: signal(0),
             connect_started: signal(None),
             frozen: signal(false),
             camera: stored(RefCell::new(camera)),
@@ -448,6 +465,9 @@ impl AppState {
     }
 
     pub fn start_connect(self) {
+        if self.update_busy.get() {
+            return;
+        }
         if self.connect_started.get().is_some()
             || self.connect_abort.with(|slot| slot.borrow().is_some())
         {
@@ -507,6 +527,8 @@ impl AppState {
                         self.remembered.set(Some(remembered));
                         self.sheet.set(None);
                         self.connect_started.set(None);
+                        self.refresh_update_info();
+                        self.resume_update();
                     }
                     Err(LinkError::Cancelled) => {
                         self.dismiss_nearby();
@@ -579,6 +601,14 @@ impl AppState {
     }
 
     pub fn begin_update(self, kind: UpdateKind) {
+        if self.update_busy.get() {
+            return;
+        }
+        self.update_kind.set(kind);
+        if !self.demo() {
+            self.begin_real_update(kind);
+            return;
+        }
         self.set_frozen(false);
         let ok = self.camera.with(|slot| {
             let mut slot = slot.borrow_mut();
@@ -601,6 +631,9 @@ impl AppState {
 
     /// Poll the fake camera and mirror phases into sheets.
     pub fn tick_update(self) {
+        if !self.demo() {
+            return;
+        }
         if self.frozen() {
             return;
         }
@@ -678,6 +711,11 @@ impl AppState {
     }
 
     pub fn finish_restart(self) {
+        if !self.demo() {
+            self.update_reconnect.set(true);
+            self.resume_update();
+            return;
+        }
         self.set_frozen(false);
         for _ in 0..8 {
             self.tick_update();
@@ -726,6 +764,10 @@ impl AppState {
     }
 
     pub fn cancel_update(self) {
+        if !self.demo() {
+            self.cancel_real_update();
+            return;
+        }
         self.camera.with(|slot| {
             if let Some(cam) = slot.borrow_mut().as_mut() {
                 let _ = block_on_ready(cam.cancel());
@@ -738,10 +780,16 @@ impl AppState {
 
     pub fn retry_update(self) {
         self.dismiss_error();
-        self.begin_update(UpdateKind::Install);
+        if !self.demo() && platform::update::load_intent().is_some() {
+            self.update_reconnect.set(true);
+            self.resume_update();
+        } else {
+            self.begin_update(self.update_kind.get());
+        }
     }
 
     pub fn confirm_deadline_label(self) -> String {
+        let _ = self.confirm_tick.get();
         let rem = self.confirm_remaining();
         let total = rem.as_secs();
         format!("{}:{:02}", total / 60, total % 60)
@@ -754,6 +802,9 @@ impl AppState {
                 timer(Duration::from_millis(150)).await;
                 if self.frozen() {
                     continue;
+                }
+                if self.sheet() == Some(Sheet::Confirm) {
+                    self.confirm_tick.set(self.confirm_remaining().as_secs());
                 }
                 match self.sheet() {
                     Some(Sheet::Connecting { .. }) => self.tick_connecting(),
@@ -809,7 +860,10 @@ fn demo_fail_from_env() -> DemoFail {
 
 /// Connected and up to date?
 pub fn is_up_to_date(package: &PackageInfo) -> bool {
-    package.available.is_none()
+    package
+        .available
+        .as_ref()
+        .is_none_or(|available| crate::domain::version_at_least(&package.installed, available))
 }
 
 /// Rate URL for the App Store review prompt.

@@ -28,6 +28,19 @@ fn raw(key: &str) -> &'static str {
 
 fn en(key: &str) -> &'static str {
     match key {
+        "error.cancel_pending" => "Cancel Pending Update",
+        "software.checking" => "Checking for updates…",
+        "software.check" => "Check for Updates",
+        "error.download_title" => "Could Not Prepare the Update",
+        "error.service_title" => "Could Not Complete the Request",
+        "installed.verified" => "The camera is running this version.",
+        "roll.installed_subtitle" => "The camera is running the restored version.",
+        "roll.installed_title" => "GRKit %{version} Is Restored",
+        "roll.cancel_pending" => "Cancel Roll Back",
+        "roll.preparing" => "Preparing roll back…",
+        "roll.sending_title" => "Rolling Back %{model}",
+        "sending.preparing" => "Preparing and sending package…",
+        "software.unavailable" => "Update information unavailable",
         "tab.camera" => "Camera",
         "tab.settings" => "Settings",
         "home.title" => "Add Your Camera",
@@ -94,8 +107,10 @@ fn en(key: &str) -> &'static str {
         "confirm.step3" => "Choose Execute",
         "confirm.waiting" => "Waiting for the camera · %{time}",
         "restart.title" => "Restart the Camera",
-        "restart.subtitle" => "Turn it off and on. It installs as it starts.",
-        "restart.done" => "Done",
+        "restart.subtitle" => {
+            "Turn the camera off and on, then reconnect to verify the installed version."
+        }
+        "restart.done" => "Check Installed Version",
         "restart.cancel" => "Cancel Update",
         "installed.title" => "GRKit %{version} Is Installed",
         "installed.subtitle" => "You can roll back to %{previous} in Software Update.",
@@ -109,11 +124,17 @@ fn en(key: &str) -> &'static str {
         "error.card_full_title" => "Card Is Full",
         "error.card_full_body" => "Free %{size}, then try again.",
         "error.not_confirmed_title" => "Not Confirmed",
-        "error.not_confirmed_body" => "Confirm within 5 minutes. Nothing changed.",
+        "error.not_confirmed_body" => {
+            "Confirmation timed out. Check the camera before trying again."
+        }
         "error.refused_title" => "Update Refused",
-        "error.refused_body" => "The camera refused the update. Nothing changed.",
+        "error.refused_body" => {
+            "The camera refused this package. Check that it supports your camera and firmware."
+        }
         "error.lost_title" => "Connection Lost",
-        "error.lost_body" => "The link dropped. Nothing changed on the camera.",
+        "error.lost_body" => {
+            "Reconnect to check the update status. The camera may still have a pending update."
+        }
         "error.pair_title" => "Pairing Needed",
         "error.pair_body" => "Complete pairing on the camera, then try again.",
         "error.wifi_title" => "Could Not Join Wi-Fi",
@@ -140,6 +161,19 @@ fn en(key: &str) -> &'static str {
 
 fn zh(key: &str) -> Option<&'static str> {
     Some(match key {
+        "error.cancel_pending" => "取消待处理的更新",
+        "software.checking" => "正在检查更新…",
+        "software.check" => "检查更新",
+        "software.unavailable" => "暂时无法获取更新信息",
+        "sending.preparing" => "正在准备并发送更新包…",
+        "roll.sending_title" => "正在回退 %{model}",
+        "roll.preparing" => "正在准备回退…",
+        "roll.cancel_pending" => "取消回退",
+        "roll.installed_title" => "已恢复 GRKit %{version}",
+        "roll.installed_subtitle" => "相机正在运行恢复后的版本。",
+        "installed.verified" => "已确认相机正在运行此版本。",
+        "error.service_title" => "无法完成请求",
+        "error.download_title" => "无法准备更新",
         "tab.camera" => "相机",
         "tab.settings" => "设置",
         "home.title" => "添加你的相机",
@@ -198,8 +232,8 @@ fn zh(key: &str) -> Option<&'static str> {
         "confirm.step3" => "选择执行",
         "confirm.waiting" => "等待相机 · %{time}",
         "restart.title" => "重启相机",
-        "restart.subtitle" => "关机再开机。启动时会完成安装。",
-        "restart.done" => "完成",
+        "restart.subtitle" => "请将相机关机再开机，然后重新连接以确认已安装的版本。",
+        "restart.done" => "检查已安装版本",
         "restart.cancel" => "取消更新",
         "installed.title" => "GRKit %{version} 已安装",
         "installed.subtitle" => "可在“软件更新”中回退到 %{previous}。",
@@ -213,11 +247,11 @@ fn zh(key: &str) -> Option<&'static str> {
         "error.card_full_title" => "存储卡已满",
         "error.card_full_body" => "请先腾出 %{size}，然后重试。",
         "error.not_confirmed_title" => "未确认",
-        "error.not_confirmed_body" => "请在 5 分钟内确认。相机未改动。",
+        "error.not_confirmed_body" => "确认已超时。请先检查相机，再重试。",
         "error.refused_title" => "更新被拒绝",
-        "error.refused_body" => "相机拒绝了此次更新。未改动。",
+        "error.refused_body" => "相机拒绝了此更新包。请确认更新包支持你的相机和固件版本。",
         "error.lost_title" => "连接已断开",
-        "error.lost_body" => "连接中断。相机未改动。",
+        "error.lost_body" => "请重新连接以检查更新状态。相机上可能仍有待处理的更新。",
         "error.pair_title" => "需要配对",
         "error.pair_body" => "请先在相机上完成配对，然后重试。",
         "error.wifi_title" => "无法加入 Wi-Fi",

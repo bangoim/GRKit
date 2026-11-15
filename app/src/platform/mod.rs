@@ -6,6 +6,8 @@ mod ios;
 mod stub;
 
 pub(crate) mod http;
+pub(crate) mod release;
+pub(crate) mod update;
 
 use crate::domain::{
     CAMERA_HTTP_BASE, CameraModel, CameraStatus, ConnectStep, LinkError, NearbyCamera, PackageInfo,

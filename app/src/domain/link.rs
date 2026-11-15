@@ -45,8 +45,6 @@ pub enum LinkError {
     NeedsGrkit,
     /// Unexpected HTTP or transport failure.
     Http(String),
-    /// Update / roll-back HTTP is added in a later task.
-    NotImplemented,
 }
 
 /// A camera seen while scanning.

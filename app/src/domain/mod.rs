@@ -12,6 +12,10 @@ mod link;
 mod nearby_prompt;
 mod remembered;
 mod update;
+mod update_api;
+pub use update_api::{
+    JournalState, UpdateIntent, UpdateObservation, UpdateSnapshot, observe_update, response_error,
+};
 pub mod uuids;
 mod wifi_cred;
 

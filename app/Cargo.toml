@@ -11,7 +11,7 @@ nsh-core = { version = "0.5.1", features = ["svg"] }
 nsh-base = "0.5.1"
 env_logger = "0.11"
 log = "0.4"
-# Reserved for a later task that talks to the package on the camera.
+# Official release verification and package assembly.
 grkit-core = { path = "../crates/grkit-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

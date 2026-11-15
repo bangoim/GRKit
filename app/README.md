@@ -1,9 +1,10 @@
 # GRKit app
 
 Phone app for connecting to a RICOH GR camera and managing GRKit. The iOS link
-discovers cameras over BLE, joins Wi-Fi, and reads GRKit status. Update screens
-currently use a fake transport. See [camera connection](docs/connection.md) for
-ownership, cancellation, GR Snap alignment, and hardware verification.
+discovers cameras over BLE, joins Wi-Fi, and reads GRKit status. Updates use
+official signed packages; rollback uses the camera backup. See
+[camera connection](docs/connection.md) and [updates](docs/updates.md) for protocol,
+cancellation, recovery, and hardware verification.
 
 ## Requirements
 

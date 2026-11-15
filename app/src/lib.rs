@@ -33,12 +33,6 @@ use nsh_core::prelude::*;
 
 use crate::store::AppState;
 
-/// Keeps the core crate linked for a later task that talks to packages.
-#[allow(dead_code)]
-fn _link_core() {
-    let _ = std::any::type_name::<grkit_core::camera::Camera>();
-}
-
 /// The crate's UI set (`nsh.json` `"rust"`, `"root": "App"`).
 #[native_module("grkit/native")]
 fn native(registry: &mut Registry) {

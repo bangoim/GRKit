@@ -2,8 +2,8 @@
 
 The real iOS connection path is BLE discovery → encrypted Wi-Fi credentials →
 camera wake / AP startup → Wi-Fi authorization and association → GRKit status and
-package verification. Demo mode uses `FakeCamera`; update transport is still a
-separate unfinished integration.
+package verification. Demo mode uses `FakeCamera`; real updates and rollback use
+the [camera update protocol](updates.md).
 
 ## Ownership and cancellation
 

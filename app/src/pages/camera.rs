@@ -97,6 +97,7 @@ fn empty_home(app: AppState) -> impl IntoElement {
 
 fn connected(app: AppState, model: CameraModel, online: bool) -> impl IntoElement {
     let package = app.package();
+    let update_unknown = !app.demo() && package.as_ref().is_none_or(|p| p.available.is_none());
     let up_to_date = package.as_ref().is_some_and(is_up_to_date);
     scroll().flex_1().bg(move || token("grouped")).child(
         view()
@@ -151,6 +152,20 @@ fn connected(app: AppState, model: CameraModel, online: bool) -> impl IntoElemen
             .child(if !online {
                 primary_button(tr("nearby.connect", &[]), move || app.start_connect())
                     .into_element()
+            } else if update_unknown {
+                grouped_card(chevron_row(
+                    tr("connected.software_update", &[]),
+                    Some(tr(
+                        if app.release_checking() {
+                            "software.checking"
+                        } else {
+                            "software.unavailable"
+                        },
+                        &[],
+                    )),
+                    move || app.open_software_update(),
+                ))
+                .into_element()
             } else if up_to_date {
                 up_to_date_card(app).into_element()
             } else {
@@ -160,10 +175,7 @@ fn connected(app: AppState, model: CameraModel, online: bool) -> impl IntoElemen
 }
 
 fn update_available_card(app: AppState) -> impl IntoElement {
-    let version = app
-        .package()
-        .and_then(|p| p.available)
-        .unwrap_or_else(|| "1.7.0".into());
+    let version = app.package().and_then(|p| p.available).unwrap_or_default();
     grouped_card(
         view()
             .p_4()

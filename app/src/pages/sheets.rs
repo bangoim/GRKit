@@ -424,13 +424,27 @@ fn sending(app: AppState) -> impl IntoElement {
         UpdatePhase::Sending { progress, .. } => progress * 100.0,
         _ => 100.0,
     };
+    let indeterminate = progress_val < 0.0;
+    let rollback = matches!(
+        app.flow_phase(),
+        UpdatePhase::Sending {
+            kind: UpdateKind::Rollback,
+            ..
+        }
+    );
     let version = app
         .package()
-        .and_then(|p| p.available)
-        .unwrap_or_else(|| "1.7.0".into());
+        .and_then(|p| if rollback { p.rollback } else { p.available });
     sheet_shell(
-        tr("sending.title", &[("model", &model)]),
-        Some(format!("GRKit {version}")),
+        tr(
+            if rollback {
+                "roll.sending_title"
+            } else {
+                "sending.title"
+            },
+            &[("model", &model)],
+        ),
+        version.map(|version| format!("GRKit {version}")),
         Some(app.nearby_model().unwrap_or(CameraModel::Gr3)),
         false,
         || {},
@@ -451,18 +465,27 @@ fn sending(app: AppState) -> impl IntoElement {
                             .items_center()
                             .justify_between()
                             .child(
-                                text(tr("sending.progress", &[]))
-                                    .text_size(px(17.0))
-                                    .font_weight(FontWeight::SEMIBOLD),
+                                text(tr(
+                                    if rollback {
+                                        "roll.preparing"
+                                    } else if indeterminate {
+                                        "sending.preparing"
+                                    } else {
+                                        "sending.progress"
+                                    },
+                                    &[],
+                                ))
+                                .text_size(px(17.0))
+                                .font_weight(FontWeight::SEMIBOLD),
                             )
-                            .child(
+                            .child((!indeterminate).then(|| {
                                 text(format!("{progress_val:.0}%"))
                                     .text_size(px(15.0))
                                     .line_height(px(22.0))
-                                    .text_color(move || theme().muted_foreground),
-                            ),
+                                    .text_color(move || theme().muted_foreground)
+                            })),
                     )
-                    .child(
+                    .child((!indeterminate).then(|| {
                         progress()
                             .value(progress_val)
                             .accessibility_label(tr("sending.progress", &[]))
@@ -474,8 +497,8 @@ fn sending(app: AppState) -> impl IntoElement {
                             })
                             .indicator_style(|s| {
                                 s.h(px(4.0)).rounded(px(3.0)).bg(move || token("tint"))
-                            }),
-                    ),
+                            })
+                    })),
             )
             .child(
                 view()
@@ -497,7 +520,10 @@ fn sending(app: AppState) -> impl IntoElement {
                     .text_size(px(13.0))
                     .line_height(px(18.0))
                     .text_color(move || theme().muted_foreground),
-            ),
+            )
+            .child(secondary_button(tr("sending.cancel", &[]), move || {
+                app.cancel_update()
+            })),
     )
 }
 
@@ -520,7 +546,6 @@ fn confirm(app: AppState) -> impl IntoElement {
         tr("confirm.subtitle", &[])
     };
     let index = signal(0u32);
-    let time = app.confirm_deadline_label();
     sheet_shell(
         title,
         Some(subtitle),
@@ -562,13 +587,21 @@ fn confirm(app: AppState) -> impl IntoElement {
                     .rounded(px(8.0))
                     .bg(move || theme().muted)
                     .child(
-                        text(tr("confirm.waiting", &[("time", &time)]))
-                            .text_size(px(15.0))
-                            .line_height(px(22.0))
-                            .text_color(move || token("link"))
-                            .text_center(),
+                        text(move || {
+                            tr(
+                                "confirm.waiting",
+                                &[("time", &app.confirm_deadline_label())],
+                            )
+                        })
+                        .text_size(px(15.0))
+                        .line_height(px(22.0))
+                        .text_color(move || token("link"))
+                        .text_center(),
                     ),
-            ),
+            )
+            .child(secondary_button(tr("sending.cancel", &[]), move || {
+                app.cancel_update()
+            })),
     )
 }
 
@@ -644,17 +677,51 @@ fn restart(app: AppState) -> impl IntoElement {
                         let app = app.clone();
                         move || app.finish_restart()
                     }))
-                    .child(secondary_button(tr("restart.cancel", &[]), move || {
-                        app.cancel_update()
-                    })),
+                    .child(secondary_button(
+                        tr(
+                            if matches!(
+                                app.flow_phase(),
+                                UpdatePhase::Restart {
+                                    kind: UpdateKind::Rollback
+                                }
+                            ) {
+                                "roll.cancel_pending"
+                            } else {
+                                "restart.cancel"
+                            },
+                            &[],
+                        ),
+                        move || app.cancel_update(),
+                    )),
             ),
     )
 }
 
-fn installed(app: AppState, version: String, previous: String) -> impl IntoElement {
+fn installed(app: AppState, version: String, _previous: String) -> impl IntoElement {
+    let rollback = matches!(
+        app.flow_phase(),
+        UpdatePhase::Installed {
+            kind: UpdateKind::Rollback,
+            ..
+        }
+    );
+    let subtitle = if rollback {
+        tr("roll.installed_subtitle", &[])
+    } else if let Some(previous) = app.package().and_then(|package| package.rollback) {
+        tr("installed.subtitle", &[("previous", &previous)])
+    } else {
+        tr("installed.verified", &[])
+    };
     sheet_shell(
-        tr("installed.title", &[("version", &version)]),
-        Some(tr("installed.subtitle", &[("previous", &previous)])),
+        tr(
+            if rollback {
+                "roll.installed_title"
+            } else {
+                "installed.title"
+            },
+            &[("version", &version)],
+        ),
+        Some(subtitle),
         None,
         false,
         || {},
@@ -692,6 +759,18 @@ fn installed(app: AppState, version: String, previous: String) -> impl IntoEleme
 
 fn error_sheet(app: AppState, error: UpdateError) -> impl IntoElement {
     let (title, body, retry_label, retry) = match &error {
+        UpdateError::Service(message) => (
+            tr("error.service_title", &[]),
+            message.clone(),
+            tr("error.try_again", &[]),
+            true,
+        ),
+        UpdateError::Download(message) => (
+            tr("error.download_title", &[]),
+            message.clone(),
+            tr("error.try_again", &[]),
+            true,
+        ),
         UpdateError::CardFull { bytes_needed } => (
             tr("error.card_full_title", &[]),
             tr(
@@ -734,6 +813,9 @@ fn error_sheet(app: AppState, error: UpdateError) -> impl IntoElement {
                     let app = app.clone();
                     move || app.retry_update()
                 })
+            }))
+            .child((!app.demo() && app.has_pending_update()).then(|| {
+                secondary_button(tr("error.cancel_pending", &[]), move || app.cancel_update())
             }))
             .child(secondary_button(tr("error.close", &[]), move || {
                 app.dismiss_error()

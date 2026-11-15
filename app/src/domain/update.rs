@@ -1,27 +1,32 @@
 //! Update and roll-back state machine that mirrors the camera service.
 
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 /// How long the phone waits for the confirmation on the camera.
 pub const CONFIRM_DEADLINE: Duration = Duration::from_secs(5 * 60);
 
 /// Install a newer package, or put the previous one back.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UpdateKind {
     Install,
     Rollback,
 }
 
-/// Why an update or roll-back stopped. Nothing on the camera changes for these.
+/// Why an update or roll-back stopped. A transport failure can leave its outcome unknown.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UpdateError {
     /// The card needs this many free bytes before the send can finish.
-    CardFull { bytes_needed: u64 },
+    CardFull {
+        bytes_needed: u64,
+    },
+    Service(String),
+    Download(String),
     /// The camera refused the package.
     Refused,
     /// The user did not confirm within [`CONFIRM_DEADLINE`].
     NotConfirmed,
-    /// The link dropped; the camera package is unchanged.
+    /// The link dropped; reconnect and inspect the camera before retrying.
     ConnectionLost,
 }
 
