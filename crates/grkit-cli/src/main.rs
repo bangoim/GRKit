@@ -5,7 +5,8 @@ mod storage;
 use anyhow::{ensure, Context, Result};
 use clap::{Parser, Subcommand};
 use grkit_core::{
-    cube::Encoding, effects, fit, language::Language, packaging, release, site, Files,
+    cube::Encoding, effects, fit, language::Language, packaging, release, release_index, site,
+    Files,
 };
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -197,6 +198,14 @@ enum Command {
     Site {
         #[arg(long)]
         build: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Write the release index of a site: the GRKit version, each signed
+    /// camera, and the SHA-256 and size of every file a phone may download.
+    ReleaseIndex {
+        #[arg(long)]
+        site: PathBuf,
         #[arg(long)]
         out: PathBuf,
     },
@@ -843,6 +852,17 @@ fn run(command: Command) -> Result<Value> {
         Command::Site { build, out } => {
             let (target, files) = storage::export_runtime(&build, &out)?;
             Ok(json!({"output": out, "target": target, "files": files}))
+        }
+        Command::ReleaseIndex { site, out } => {
+            let contents = storage::read_release_site(&site)?;
+            let index = release_index::Index::of_site(&contents)?;
+            storage::write_new(&out, &index.to_bytes()?)?;
+            Ok(json!({
+                "path": out,
+                "version": index.version,
+                "cameras": index.cameras.len(),
+                "files": index.files.len(),
+            }))
         }
     }
 }

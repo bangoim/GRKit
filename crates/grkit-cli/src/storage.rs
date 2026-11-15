@@ -2,9 +2,10 @@
 
 use anyhow::{bail, ensure, Context, Result};
 use grkit_core::packaging::{self, EffectSet, VerifiedRuntime};
-use grkit_core::{effects, Files};
+use grkit_core::release_index::SiteContents;
+use grkit_core::{camera, effects, release, Files};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -172,6 +173,88 @@ fn read_build(directory: &Path) -> Result<(Vec<u8>, Files)> {
 pub fn load_build(directory: &Path) -> Result<VerifiedRuntime> {
     let (manifest, files) = read_build(directory)?;
     packaging::load_runtime(&manifest, &files)
+}
+
+/// Reads the release files of a site directory into `SiteContents` for
+/// `release_index::Index::of_site`.
+pub fn read_release_site(site: &Path) -> Result<SiteContents> {
+    ensure!(
+        fs::symlink_metadata(site)?.is_dir(),
+        "Expected a site directory: {}",
+        site.display()
+    );
+    let mut contents = SiteContents::default();
+    let release_root = site.join("release");
+    ensure!(release_root.is_dir(), "The site has no release/ directory");
+    for folder in directory_entries(&release_root)? {
+        if !fs::symlink_metadata(&folder)?.is_dir() {
+            continue;
+        }
+        let id = basename(&folder)?;
+        // The index file itself lives under release/; skip it.
+        if id == "index.json" {
+            continue;
+        }
+        let _ = camera::find(id)?;
+        let statement = read_bounded(&folder.join(release::STATEMENT_ENTRY), 1024 * 1024)?;
+        let signature = read_bounded(&folder.join(release::SIGNATURE_ENTRY), 1024)?;
+        contents
+            .releases
+            .insert(id.to_owned(), (statement, signature));
+    }
+
+    let camera_ids: Vec<String> = contents.releases.keys().cloned().collect();
+    for camera_id in camera_ids {
+        let camera = camera::find(&camera_id)?;
+        for target in camera.targets() {
+            if contents.runtimes.contains_key(target) {
+                continue;
+            }
+            let directory = site.join("runtime").join(target);
+            let (manifest, files) = read_build(&directory)?;
+            let runtime = packaging::load_runtime(&manifest, &files)?;
+            contents.manifests.insert(target.to_owned(), manifest);
+            contents.runtimes.insert(target.to_owned(), runtime);
+
+            let effects_dir = site.join("effects").join(target);
+            ensure!(effects_dir.is_dir(), "The site has no effects/{target}");
+            let mut names = BTreeSet::new();
+            collect_files(&effects_dir, Path::new(""), &mut names)?;
+            let mut effects = Files::new();
+            for name in names {
+                effects.insert(name.clone(), read_regular(&effects_dir.join(&name))?);
+            }
+            contents.effects.insert(target.to_owned(), effects);
+        }
+
+        let guides_dir = site.join("guides").join(&camera_id);
+        ensure!(guides_dir.is_dir(), "The site has no guides/{camera_id}");
+        let mut guides = BTreeMap::new();
+        for path in directory_entries(&guides_dir)? {
+            let name = basename(&path)?;
+            let Some(language) = name.strip_suffix(".pdf") else {
+                continue;
+            };
+            guides.insert(
+                language.to_owned(),
+                read_bounded(&path, packaging::MAX_FILE_SIZE)?,
+            );
+        }
+        contents.guides.insert(camera_id, guides);
+    }
+
+    let modules_dir = site.join("modules");
+    if modules_dir.is_dir() {
+        for path in directory_entries(&modules_dir)? {
+            let name = basename(&path)?;
+            ensure!(name.ends_with(".GRM"), "Unexpected module entry: {name}");
+            contents.modules.insert(
+                name.to_owned(),
+                read_bounded(&path, packaging::MAX_FILE_SIZE)?,
+            );
+        }
+    }
+    Ok(contents)
 }
 
 /// Writes a verified build into a site directory as a new `runtime/<target>/`.
