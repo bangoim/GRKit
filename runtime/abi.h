@@ -7,7 +7,7 @@
 /* The private header: the start of the registry array. ARM code addresses it
    through the literal GRKIT_HEADER_REFERENCE, which the installer relocates. */
 #define GRKIT_HEADER_REFERENCE 0x58012340
-#define GRKIT_HOST_HEADER_SIZE 6528
+#define GRKIT_HOST_HEADER_SIZE 6540
 /* The most module pages, layers, and plane filters that the header holds. */
 #define GRKIT_MODULE_PAGES_MAX 16
 #define GRKIT_MODULE_LAYERS_MAX 16
@@ -185,6 +185,12 @@
 #define GRKIT_RECIPES_CHANGED(h) (++(h)[GRKIT_HOST_RECIPE_CHANGES/4])
 #define GRKIT_HOST_MAGIC_VALUE 0x314d5247
 #define GRKIT_HOST_VERSION_VALUE 1
+#define GRKIT_UPDATE_WAITING 1U
+#define GRKIT_UPDATE_CONFIRMED 2U
+#define GRKIT_UPDATE_READY 3U
+#define GRKIT_CUE_PENDING 1U
+#define GRKIT_CUE_UPDATE_READY 1U
+#define GRKIT_CUE_UPDATED 2U
 /* Number of Image Control records. */
 #define GRKIT_HOST_COUNT 0
 /* Address of record 0. The records follow the header without gaps. */
@@ -560,6 +566,20 @@
    settings. A capture of the current settings reads the native settings from
    it (runtime/recipes.h). */
 #define GRKIT_HOST_RECIPE_PREVIEW 6524
+/* An update over Wi-Fi (grkit_core::runtime::update): UPDATE_WAITING while its
+   journal waits for the confirmation on the camera, which the resident loader
+   sets; UPDATE_CONFIRMED after the confirmation in GRKit Settings
+   (runtime/menu_settings.h); UPDATE_READY after the resident loader made the
+   journal run at the next power-on; else 0. */
+#define GRKIT_HOST_UPDATE 6528
+/* The version of that update, from `card::VERSION_FILE`: major << 16, minor <<
+   8, and patch, or 0 when the package does not name it. */
+#define GRKIT_HOST_UPDATE_VERSION 6532
+/* The text of the load cue (GRKIT_HOST_LOAD_CUE): 0 for GRKit Loaded,
+   CUE_UPDATE_READY while an update over Wi-Fi waits, or CUE_UPDATED at the
+   first start after one installed. The cue sets it back to 0 when it ends
+   (runtime/viewfinder.h). */
+#define GRKIT_HOST_CUE_LABEL 6536
 /* Consumer request ticket, 1..2147483647. Zero means no request. */
 #define GRKIT_PERSIST_REQUEST 0
 /* Producer publishes this ticket after all payload stores are visible. */
@@ -912,7 +932,7 @@
    glyphs from GRKIT_GLYPH_FIRST. For entry n, a u16 width, a u16 height, and
    the u32 offset of its pixels from the table start at 8 n. Each pixel is one
    byte of text coverage, row by row. */
-#define GRKIT_LABELS_SIZE 77824
+#define GRKIT_LABELS_SIZE 86016
 /* The profile table after the labels (runtime/profile.h). For each of the
    first GRKIT_PROFILE_MODULES listed modules, at GRKIT_PROFILE_MODULE_SIZE n:
    its code start, its code end, and GRKIT_PROFILE_NAME_BYTES ASCII bytes of
@@ -920,7 +940,7 @@
    GRKIT_PROFILE_SLOT_SIZE bytes: calls, cycles, and the cycles of the largest
    call. The core points come first, then GRKIT_PROFILE_KINDS slots for each of
    those modules. */
-#define GRKIT_PROFILE 244360
+#define GRKIT_PROFILE 252552
 #define GRKIT_PROFILE_SIZE 500
 #define GRKIT_PROFILE_MODULES 8
 #define GRKIT_PROFILE_MODULE_SIZE 16
@@ -941,10 +961,10 @@
 #define GRKIT_PROFILE_FILTER 1
 #define GRKIT_PROFILE_CALL 2
 /* Everything after the records: the script array must hold it. */
-#define GRKIT_TAIL_SIZE 248956
+#define GRKIT_TAIL_SIZE 257148
 /* The own red and blue curves of the native looks with Toning: for each of
    GRKIT_TONE_SLOTS slots, 256 u16 red samples, then the blue ones. */
-#define GRKIT_TONE_CURVES 244860
+#define GRKIT_TONE_CURVES 253052
 #define GRKIT_TONE_SLOTS 4
 #define GRKIT_TONE_SLOT_SIZE 1024
 #define GRKIT_TEXT_SUMMARY 8192
@@ -964,15 +984,15 @@
 #define GRKIT_TEXT_RECORDS 40
 #define GRKIT_TEXT(h) ((h)[GRKIT_HOST_TAIL/4]+GRKIT_PICTURE_SCRATCH)
 #define GRKIT_LABELS(h) (GRKIT_TEXT(h)+GRKIT_TEXT_SIZE)
-#define GRKIT_LABEL_COUNT 22
+#define GRKIT_LABEL_COUNT 24
 #define GRKIT_LABEL_CROP_CAMERA 19
 #define GRKIT_MODULE_LABEL_COUNT 14
-#define GRKIT_GLYPH_FIRST 22
+#define GRKIT_GLYPH_FIRST 24
 #define GRKIT_GLYPH_COUNT 95
 #define GRKIT_GLYPH_HEIGHT 28
-#define GRKIT_SMALL_GLYPH_FIRST 117
+#define GRKIT_SMALL_GLYPH_FIRST 119
 #define GRKIT_SMALL_GLYPH_HEIGHT 20
-#define GRKIT_CAPTION_FIRST 212
+#define GRKIT_CAPTION_FIRST 214
 #define GRKIT_CAPTION_CHARACTERS "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 #define GRKIT_CAPTION_TOP 22
 #define GRKIT_CAPTION_INK 255
@@ -1039,6 +1059,10 @@
 #define TEXT_UNIT 74
 /* The settings row that orders the options of a module page. */
 #define TEXT_ORDER 78
-#define GRKIT_TEXT_STRINGS 79
+/* The GRKit Settings row of an update over Wi-Fi that waits for its
+   confirmation, then its values Later and Install, then the text of its
+   confirm before and after the version. */
+#define TEXT_UPDATE 79
+#define GRKIT_TEXT_STRINGS 84
 
 #endif

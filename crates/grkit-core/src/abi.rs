@@ -557,7 +557,31 @@ packed_fields!(HEADER_FIELDS, HOST_HEADER_SIZE {
     /// writes native settings. A capture of the current settings reads the
     /// native settings from it (runtime/recipes.h).
     HOST_RECIPE_PREVIEW: 4;
+    /// An update over Wi-Fi (grkit_core::runtime::update): UPDATE_WAITING
+    /// while its journal waits for the confirmation on the camera, which the
+    /// resident loader sets; UPDATE_CONFIRMED after the confirmation in GRKit
+    /// Settings (runtime/menu_settings.h); UPDATE_READY after the resident
+    /// loader made the journal run at the next power-on; else 0.
+    HOST_UPDATE: 4;
+    /// The version of that update, from `card::VERSION_FILE`: major << 16,
+    /// minor << 8, and patch, or 0 when the package does not name it.
+    HOST_UPDATE_VERSION: 4;
+    /// The text of the load cue (GRKIT_HOST_LOAD_CUE): 0 for GRKit Loaded,
+    /// CUE_UPDATE_READY while an update over Wi-Fi waits, or CUE_UPDATED at
+    /// the first start after one installed. The cue sets it back to 0 when it
+    /// ends (runtime/viewfinder.h).
+    HOST_CUE_LABEL: 4;
 });
+
+/// The values of GRKIT_HOST_UPDATE.
+pub const UPDATE_WAITING: u32 = 1;
+pub const UPDATE_CONFIRMED: u32 = 2;
+pub const UPDATE_READY: u32 = 3;
+/// GRKIT_HOST_LOAD_CUE for a cue that starts at the next still live view.
+pub const CUE_PENDING: u32 = 1;
+/// The values of GRKIT_HOST_CUE_LABEL.
+pub const CUE_UPDATE_READY: u32 = 1;
+pub const CUE_UPDATED: u32 = 2;
 
 pub const RECORD_SIZE: usize = 0x1100;
 
@@ -801,7 +825,7 @@ pub const CANVAS_ENTRY_SIZE: usize = 80;
 pub const PICTURE_SCRATCH: usize = CANVAS_TABLE + CANVAS_ENTRIES * CANVAS_ENTRY_SIZE;
 /// Bytes of the live-view labels and glyphs after the menu text
 /// (`artwork::overlay_labels`).
-pub const LABELS_SIZE: usize = 77824;
+pub const LABELS_SIZE: usize = 86016;
 /// The profile table after the labels (runtime/profile.h): for each of the
 /// first `PROFILE_MODULES` listed modules its code start, its code end, and 8
 /// ASCII bytes of its name, then a
@@ -1382,6 +1406,16 @@ pub fn header() -> String {
     .unwrap();
     writeln!(out, "#define GRKIT_HOST_MAGIC_VALUE {HOST_MAGIC_VALUE:#x}").unwrap();
     writeln!(out, "#define GRKIT_HOST_VERSION_VALUE {HOST_VERSION_VALUE}").unwrap();
+    for (name, value) in [
+        ("UPDATE_WAITING", UPDATE_WAITING),
+        ("UPDATE_CONFIRMED", UPDATE_CONFIRMED),
+        ("UPDATE_READY", UPDATE_READY),
+        ("CUE_PENDING", CUE_PENDING),
+        ("CUE_UPDATE_READY", CUE_UPDATE_READY),
+        ("CUE_UPDATED", CUE_UPDATED),
+    ] {
+        writeln!(out, "#define GRKIT_{name} {value}U").unwrap();
+    }
     table(&mut out, HEADER_FIELDS, false);
     table(&mut out, PERSIST_FIELDS, false);
     for (name, value) in [

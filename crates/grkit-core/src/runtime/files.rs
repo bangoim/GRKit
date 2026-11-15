@@ -8,7 +8,7 @@ use super::ICON_STRIDE;
 use crate::camera::Camera;
 use crate::card::{
     INSTALL_FILE, LINUX_DATA_DIRECTORY, LINUX_DIRECTORY, LOADER_FILE, PACKAGE_FOLDER,
-    RESIDENT_FILE, SCAN_FILE,
+    RESIDENT_FILE, SCAN_FILE, SERVE_FILE,
 };
 use crate::Files;
 
@@ -66,6 +66,13 @@ const BOOT_LOG_LINES: u32 = 400;
 const CORE_CHOICE: &str = "CORE.TXT";
 /// The marker in RAM of the first SCAN.SH of a power-on.
 const BOOT_MARK: &str = "/tmp/grkit-boot";
+/// The marker in RAM of the start of the service (`SERVE_FILE`) in a
+/// power-on.
+const SERVE_MARK: &str = "/tmp/grkit-serve";
+/// The argument of SCAN.SH that only starts the service. After an INSTALL
+/// through the fast-boot files, no SCAN.SH ran, so the resident loader runs
+/// SCAN.SH with it (`runtime::loader`).
+pub const SCAN_SERVE_ARGUMENT: &str = "serve";
 
 /// The core file of a runtime build: the core of one firmware build and its
 /// installer, which SCAN.SH and INSTALL.SH run.
@@ -125,7 +132,7 @@ pub fn package_runtime_files_with(binaries: &[&[u8]], fast: &Files, icon_stride:
     let count = binaries.len();
     assert!((1..=MAX_CORE_FILES).contains(&count));
     let target = core_path("LOADER.TTL");
-    let startup = format!("filesearch '{target}'\r\nif result = 0 goto done\r\ninclude '{target}'\r\n:done\r\nend\r\n");
+    let startup = super::update::startup_script(&target);
     let name = |index: usize| {
         core_path_of(index, count)
             .rsplit('/')
@@ -144,19 +151,33 @@ pub fn package_runtime_files_with(binaries: &[&[u8]], fast: &Files, icon_stride:
         )
         .into_bytes()
     };
-    // The first SCAN.SH of a power-on starts the boot log of the start, with
-    // only the last lines of the earlier starts. A marker in RAM tells the
-    // first run, because the loader repeats SCAN.SH until it finds a plan.
+    // The first SCAN.SH of a power-on starts the service (`SERVE_FILE`) of a
+    // runtime that has one. The service runs apart from the script, with no
+    // input or output, so that `lcmd` does not wait for it. With
+    // `SCAN_SERVE_ARGUMENT`, SCAN.SH ends there: it writes nothing to the
+    // card, because the camera may then be saving pictures.
+    //
+    // The first SCAN.SH of a power-on also starts the boot log of the start,
+    // with only the last lines of the earlier starts, and notes the service.
+    // A marker in RAM tells the first run, because the loader repeats SCAN.SH
+    // until it finds a plan.
     let start = format!(
-        "mkdir -p {LINUX_DATA_DIRECTORY}\n\
+        "if [ ! -e {SERVE_MARK} ] && [ -e {serve} ]; then\n\
+         \x20 : >{SERVE_MARK}\n\
+         \x20 (cd / && exec {serve} </dev/null >/dev/null 2>&1) &\n\
+         fi\n\
+         [ \"$1\" = {SCAN_SERVE_ARGUMENT} ] && exit 0\n\
+         mkdir -p {LINUX_DATA_DIRECTORY}\n\
          if [ ! -e {BOOT_MARK} ]; then\n\
          \x20 : >{BOOT_MARK}\n\
          \x20 n=$(grep -c '' {log} 2>/dev/null)\n\
          \x20 [ \"${{n:-0}}\" -gt {lines} ] && tail -n {keep} {log} >{BOOT_MARK} && cat {BOOT_MARK} >{log}\n\
          \x20 read t _ </proc/uptime; echo \"$t load\" >>{log}\n\
+         \x20 [ -e {SERVE_MARK} ] && echo \"$t serve\" >>{log}\n\
          fi\n",
         lines = BOOT_LOG_LINES,
         keep = BOOT_LOG_LINES * 3 / 4,
+        serve = format_args!("{LINUX_DIRECTORY}/{}", SERVE_FILE.rsplit('/').next().unwrap()),
     );
     let single = |mode: &str| format!("{LINUX_DIRECTORY}/{} --{mode}\nstatus=$?\n", name(0));
     let names = |range: std::ops::Range<usize>| range.map(name).collect::<Vec<_>>().join(" ");
@@ -200,7 +221,7 @@ pub fn package_runtime_files_with(binaries: &[&[u8]], fast: &Files, icon_stride:
         ),
     };
     let mut files = Files::from([
-        ("SCRIPT/STARTUP.TTL".into(), startup.into_bytes()),
+        (crate::card::STARTUP_FILE.into(), startup.into_bytes()),
         (LOADER_FILE.into(), loader_with(icon_stride, &releases)),
         (RESIDENT_FILE.into(), resident()),
         (SCAN_FILE.into(), wrapper(scan, "scan", &start)),

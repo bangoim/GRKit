@@ -3,12 +3,13 @@
 
 use super::*;
 use crate::abi::{
-    DIAL_SET_WORDS, HOST_DIAL_SETS, HOST_DIAL_SET_CHANGES, HOST_PERSIST_WORD,
-    HOST_PROCESSING_CALLS, HOST_PROFILE, HOST_RECIPE_CHANGES, PERSIST_CORE, PERSIST_EFFECTS,
+    CUE_PENDING, CUE_UPDATED, CUE_UPDATE_READY, DIAL_SET_WORDS, HOST_CUE_LABEL, HOST_DIAL_SETS,
+    HOST_DIAL_SET_CHANGES, HOST_LOAD_CUE, HOST_PERSIST_WORD, HOST_PROCESSING_CALLS, HOST_PROFILE,
+    HOST_RECIPE_CHANGES, HOST_UPDATE, HOST_UPDATE_VERSION, PERSIST_CORE, PERSIST_EFFECTS,
     PERSIST_EFFECT_COUNT, PERSIST_EFFECT_WORDS, PERSIST_MODULES, PERSIST_MODULE_COUNT,
     PERSIST_MODULE_WORDS, PERSIST_READY, PERSIST_RELEASE, PERSIST_REQUEST, PERSIST_REVISION,
     PERSIST_WORDS, PROFILE, PROFILE_KINDS, PROFILE_MODULES, PROFILE_MODULE_SIZE, PROFILE_POINTS,
-    PROFILE_SLOTS, PROFILE_SLOT_SIZE,
+    PROFILE_SLOTS, PROFILE_SLOT_SIZE, UPDATE_CONFIRMED, UPDATE_READY, UPDATE_WAITING,
 };
 use crate::capabilities::{self, StateFile};
 use crate::card::{DATA_FOLDER, LINUX_DIRECTORY, RTOS_PACKAGE_FOLDER};
@@ -17,6 +18,24 @@ use crate::card::{DATA_FOLDER, LINUX_DIRECTORY, RTOS_PACKAGE_FOLDER};
 /// state file when two reads in a row agree, so a change reaches the card
 /// one to two intervals after the last change.
 pub const STATE_POLL_MS: u32 = 2000;
+/// After an INSTALL through the fast-boot files, the resident loader runs
+/// `SCAN.SH serve` (`SCAN_SERVE_ARGUMENT`) at this many polls, one each, to
+/// start the service: about a minute, the time that Linux and the card can
+/// take after power-on. A request returns NG until Linux and the card are
+/// ready, and SCAN.SH starts the service once, so the later requests do
+/// nothing. The script cannot see the service start without a file on the
+/// card, which the camera may write pictures to at that time.
+pub const SERVE_POLLS: u32 = 30;
+/// The service file in the package folder (`crate::card::SERVE_FILE`).
+const SERVE_NAME: &str = "SERVE.BIN";
+/// The resident loader looks for an update over Wi-Fi that waits for its
+/// confirmation (`crate::card::REQUEST_FILE`) at every this many polls, about
+/// 10 s: the look is a card lookup, while the confirmation is a header word
+/// that it reads at each poll (`update_script`).
+pub const UPDATE_POLLS: u32 = 5;
+/// The looks after which an update that nobody confirmed goes, about five
+/// minutes.
+pub const UPDATE_LOOKS: u32 = 30;
 /// In the development profile (runtime/profile.h), the resident loader
 /// writes the counts of the core to `PROFILE.LOG` in the data folder after
 /// this many polls, and clears them.
@@ -570,6 +589,34 @@ fn state_script() -> Vec<String> {
         "if result = 0 stateok = 0".into(),
     ];
     lines.extend([
+        // Only a start that installed through the fast-boot files ran no
+        // SCAN.SH, which starts the service (`serve_script`) of a runtime
+        // that has one.
+        format!("servepolls = {SERVE_POLLS}"),
+        "if fast = 0 goto resident_serve".into(),
+        format!("filesearch '{}'", core_path(SERVE_NAME)),
+        "if result <> 0 servepolls = 0".into(),
+        ":resident_serve".into(),
+        "updatepolls = 0".into(),
+        "updatelooks = 0".into(),
+        // The version file of an update that installed at this start, with no
+        // update that waits: the load cue reads GRKit Updated.
+        format!(
+            "filesearch '{}'",
+            core_path(file_name(crate::card::VERSION_FILE))
+        ),
+        "if result = 0 goto resident_updated".into(),
+        format!(
+            "filesearch '{}'",
+            core_path(file_name(crate::card::REQUEST_FILE))
+        ),
+        "if result <> 0 goto resident_updated".into(),
+        format!("{} = {CUE_UPDATED}", word(HOST_CUE_LABEL)),
+        format!(
+            "filedelete '{}'",
+            core_path(file_name(crate::card::VERSION_FILE))
+        ),
+        ":resident_updated".into(),
         "legacy = 0".into(),
         format!("export = {}", word(HOST_PERSIST_WORD)),
         "if modulewords <> 0 goto resident_export".into(),
@@ -792,6 +839,8 @@ fn state_script() -> Vec<String> {
     lines.push("return".into());
     lines.extend(persist_capture());
     lines.extend(legacy_capture());
+    lines.extend(serve_script());
+    lines.extend(update_script());
 
     lines
 }
@@ -945,6 +994,111 @@ fn persist_entry(offset: usize, index: &str, width: usize, field: usize) -> Stri
     )
 }
 
+/// The subroutine `serve`: one request of `SCAN.SH serve`
+/// (`SERVE_POLLS`). The first poll comes one interval after the resident
+/// loader starts, so `lcmd_resp on` comes more than 1 s after the script
+/// starts (`loader`).
+fn serve_script() -> Vec<String> {
+    vec![
+        ":serve".into(),
+        "servepolls = servepolls + 1".into(),
+        "if servepolls = 1 sendln 'lcmd_resp on'".into(),
+        format!("sendln 'lcmd sh {LINUX_DIRECTORY}/SCAN.SH {SCAN_SERVE_ARGUMENT}'"),
+        "return".into(),
+    ]
+}
+
+/// The subroutine `update_poll`: an update over Wi-Fi (`runtime::update`). The
+/// service writes its journal as `card::REQUEST_FILE`. The subroutine sets
+/// GRKIT_HOST_UPDATE to UPDATE_WAITING while that file is there, so GRKit
+/// Settings shows the Update row. After the confirmation there
+/// (UPDATE_CONFIRMED), it renames the file to `card::JOURNAL_FILE`, which the
+/// startup script runs at the next power-on, and sets UPDATE_READY. An update
+/// that waits UPDATE_LOOKS looks goes, and one that the service removes is no
+/// longer shown.
+fn update_script() -> Vec<String> {
+    let name = |path: &'static str| path.rsplit('/').next().unwrap();
+    let request = core_path(name(crate::card::REQUEST_FILE));
+    let journal = core_path(name(crate::card::JOURNAL_FILE));
+    let version = core_path(name(crate::card::VERSION_FILE));
+    let word = format!("registry[{}]", HOST_UPDATE / 4);
+    let version_word = format!("registry[{}]", HOST_UPDATE_VERSION / 4);
+    // The interpreter takes an assignment to an array element only on a line
+    // of its own, not after `if`, so the subroutine jumps to those lines.
+    vec![
+        ":update_poll".into(),
+        format!("updstate = {word}"),
+        format!("if updstate = {UPDATE_CONFIRMED} goto update_confirmed"),
+        "updatepolls = updatepolls + 1".into(),
+        format!("if updatepolls < {UPDATE_POLLS} return"),
+        "updatepolls = 0".into(),
+        format!("filesearch '{request}'"),
+        "if result <> 0 goto update_waits".into(),
+        "updatelooks = 0".into(),
+        format!("if updstate = {UPDATE_WAITING} goto update_none"),
+        // A ready update whose journal the service removed is gone.
+        format!("if updstate <> {UPDATE_READY} return"),
+        format!("filesearch '{journal}'"),
+        "if result <> 0 return".into(),
+        ":update_none".into(),
+        format!("{word} = 0"),
+        "return".into(),
+        ":update_waits".into(),
+        "updatelooks = updatelooks + 1".into(),
+        format!("if updatelooks >= {UPDATE_LOOKS} goto update_late"),
+        // A ready update that the service replaced waits again.
+        format!("if updstate = {UPDATE_WAITING} return"),
+        "call update_version".into(),
+        format!("{word} = {UPDATE_WAITING}"),
+        // The load cue tells it again in live view: GRKit Update Ready.
+        format!("registry[{}] = {CUE_UPDATE_READY}", HOST_CUE_LABEL / 4),
+        format!("registry[{}] = {CUE_PENDING}", HOST_LOAD_CUE / 4),
+        "return".into(),
+        ":update_late".into(),
+        format!("filedelete '{request}'"),
+        format!("filedelete '{version}'"),
+        "updatelooks = 0".into(),
+        format!("{word} = 0"),
+        "return".into(),
+        ":update_confirmed".into(),
+        format!("filesearch '{request}'"),
+        "if result = 0 goto update_renamed".into(),
+        format!("filerename '{request}' '{journal}'"),
+        ":update_renamed".into(),
+        "updatelooks = 0".into(),
+        format!("filesearch '{journal}'"),
+        "if result = 0 goto update_none".into(),
+        format!("{word} = {UPDATE_READY}"),
+        "return".into(),
+        // The version file has six digits (`card::VERSION_FILE`). The
+        // interpreter reads a file one octet at a time, as `read_error` does.
+        ":update_version".into(),
+        "updversion = 0".into(),
+        "updpair = 0".into(),
+        format!("fileopen updfh '{version}' 0"),
+        "if updfh < 0 goto update_version_end".into(),
+        "for updindex 1 6".into(),
+        "fileread updfh 1 octet".into(),
+        "if result != 0 goto update_version_close".into(),
+        "str2code upddigit octet".into(),
+        "upddigit = upddigit - 48".into(),
+        "if upddigit < 0 upddigit = 0".into(),
+        "if upddigit > 9 upddigit = 0".into(),
+        // Two digits each: the version packs as major << 16, minor << 8,
+        // patch, which the runtime splits without a division.
+        "updpair = updpair * 10 + upddigit".into(),
+        "updodd = updindex and 1".into(),
+        "if updodd = 0 updversion = updversion * 256 + updpair".into(),
+        "if updodd = 0 updpair = 0".into(),
+        "next".into(),
+        ":update_version_close".into(),
+        "fileclose updfh".into(),
+        ":update_version_end".into(),
+        format!("{version_word} = updversion"),
+        "return".into(),
+    ]
+}
+
 /// Request a view on the App task. A timeout leaves the request outstanding
 /// for the next poll. Only the consumer releases a completed view, including
 /// invalid views, so a delayed response cannot overwrite a view during I/O.
@@ -1069,6 +1223,8 @@ fn legacy_capture() -> Vec<String> {
 /// every completed capture, including a skipped or failed save.
 fn watch_poll(name: &str) -> Vec<String> {
     let mut lines = vec![
+        format!("if servepolls < {SERVE_POLLS} call serve"),
+        "call update_poll".into(),
         "call capture".into(),
         format!("if captured = 0 goto {name}_state_saved"),
         format!("if changes <> last goto {name}_state_release"),
@@ -1101,6 +1257,11 @@ fn watch_poll(name: &str) -> Vec<String> {
 /// The loader path of a state file with the extension `extension`.
 fn state_path(file: StateFile, extension: &str) -> String {
     format!("{DATA_FOLDER}\\{}.{extension}", file.stem())
+}
+
+/// The name of a card file of the package folder, after its folder.
+fn file_name(path: &'static str) -> &'static str {
+    path.rsplit('/').next().unwrap()
 }
 
 /// The loader path of a file of the package folder.
@@ -1263,13 +1424,188 @@ mod tests {
         assert!(loader().len() < 12 * 1024, "{}", loader().len());
     }
 
+    /// Only after an INSTALL through the fast-boot files, the resident loader
+    /// starts the service through SCAN.SH: one request at each of the first
+    /// polls, the first one interval after it starts, after `lcmd_resp on`.
+    #[test]
+    fn the_resident_script_starts_the_service_after_a_fast_boot_install() {
+        let script = state_script();
+        let all = at(&script, &format!("servepolls = {SERVE_POLLS}"));
+        assert_eq!(
+            script[all + 1..all + 5],
+            [
+                "if fast = 0 goto resident_serve",
+                "filesearch 'C:\\SCRIPT\\GRKIT\\SERVE.BIN'",
+                "if result <> 0 servepolls = 0",
+                ":resident_serve",
+            ]
+        );
+        assert!(crate::card::SERVE_FILE.ends_with(&format!("/{SERVE_NAME}")));
+        let watch = at(&script, ":watch");
+        assert!(all < watch);
+        assert_eq!(script[watch + 1], format!("mpause {STATE_POLL_MS}"));
+        assert_eq!(
+            script[watch + 2],
+            format!("if servepolls < {SERVE_POLLS} call serve")
+        );
+        let serve = at(&script, ":serve");
+        assert_eq!(
+            script[serve..serve + 5],
+            [
+                ":serve",
+                "servepolls = servepolls + 1",
+                "if servepolls = 1 sendln 'lcmd_resp on'",
+                "sendln 'lcmd sh /media/storage1/SCRIPT/GRKIT/SCAN.SH serve'",
+                "return",
+            ]
+        );
+        // The subroutine follows a return, so no path falls into it.
+        assert_eq!(script[serve - 1], "return");
+    }
+
+    /// The resident loader shows an update over Wi-Fi that waits, renames its
+    /// journal after the confirmation, and lets an update go after
+    /// UPDATE_LOOKS looks. It looks at the card only at every UPDATE_POLLS
+    /// polls, and reads the confirmation at each poll.
+    #[test]
+    fn the_resident_script_makes_a_confirmed_update_run_at_the_next_start() {
+        let script = state_script();
+        let watch = at(&script, ":watch");
+        assert_eq!(script[watch + 3], "call update_poll");
+        assert!(at(&script, "updatepolls = 0") < watch && at(&script, "updatelooks = 0") < watch);
+        let word = format!("registry[{}]", HOST_UPDATE / 4);
+        let update = at(&script, ":update_poll");
+        assert_eq!(script[update - 1], "return");
+        let body = &script[update..];
+        let line = |text: &str| at(body, text);
+        // The confirmation, a header word, at each poll; the card only at
+        // every UPDATE_POLLS polls.
+        assert!(
+            line(&format!(
+                "if updstate = {UPDATE_CONFIRMED} goto update_confirmed"
+            )) < line(&format!("if updatepolls < {UPDATE_POLLS} return"))
+        );
+        assert!(
+            line(&format!("if updatepolls < {UPDATE_POLLS} return"))
+                < line("filesearch 'C:\\SCRIPT\\GRKIT\\COMMIT.REQ'")
+        );
+        let waits = line(":update_waits");
+        assert_eq!(
+            body[waits..waits + 9],
+            [
+                ":update_waits".to_owned(),
+                "updatelooks = updatelooks + 1".into(),
+                format!("if updatelooks >= {UPDATE_LOOKS} goto update_late"),
+                format!("if updstate = {UPDATE_WAITING} return"),
+                "call update_version".into(),
+                format!("{word} = {UPDATE_WAITING}"),
+                format!("registry[{}] = {CUE_UPDATE_READY}", HOST_CUE_LABEL / 4),
+                format!("registry[{}] = {CUE_PENDING}", HOST_LOAD_CUE / 4),
+                "return".into(),
+            ]
+        );
+        // At the start after an update installed, the cue reads GRKit
+        // Updated, and the version file goes.
+        let updated = at(&script, ":resident_updated");
+        assert!(updated < watch);
+        assert_eq!(
+            script[updated - 6..updated],
+            [
+                "filesearch 'C:\\SCRIPT\\GRKIT\\COMMIT.VER'".to_owned(),
+                "if result = 0 goto resident_updated".into(),
+                "filesearch 'C:\\SCRIPT\\GRKIT\\COMMIT.REQ'".into(),
+                "if result <> 0 goto resident_updated".into(),
+                format!("registry[{}] = {CUE_UPDATED}", HOST_CUE_LABEL / 4),
+                "filedelete 'C:\\SCRIPT\\GRKIT\\COMMIT.VER'".into(),
+            ]
+        );
+        // The version of the update, before the row shows.
+        let version = line(":update_version");
+        assert_eq!(
+            body[version + 3],
+            "fileopen updfh 'C:\\SCRIPT\\GRKIT\\COMMIT.VER' 0"
+        );
+        assert_eq!(
+            body[line(":update_version_end") + 1],
+            format!("registry[{}] = updversion", HOST_UPDATE_VERSION / 4)
+        );
+        // An update that nobody confirms goes.
+        let late = line(":update_late");
+        assert_eq!(body[late + 1], "filedelete 'C:\\SCRIPT\\GRKIT\\COMMIT.REQ'");
+        assert_eq!(body[late + 2], "filedelete 'C:\\SCRIPT\\GRKIT\\COMMIT.VER'");
+        assert_eq!(body[late + 4], format!("{word} = 0"));
+        // After the confirmation, the journal runs at the next start.
+        let confirmed = line(":update_confirmed");
+        assert_eq!(
+            body[confirmed..confirmed + 10],
+            [
+                ":update_confirmed".to_owned(),
+                "filesearch 'C:\\SCRIPT\\GRKIT\\COMMIT.REQ'".into(),
+                "if result = 0 goto update_renamed".into(),
+                "filerename 'C:\\SCRIPT\\GRKIT\\COMMIT.REQ' 'C:\\SCRIPT\\GRKIT\\COMMIT.TTL'".into(),
+                ":update_renamed".into(),
+                "updatelooks = 0".into(),
+                "filesearch 'C:\\SCRIPT\\GRKIT\\COMMIT.TTL'".into(),
+                "if result = 0 goto update_none".into(),
+                format!("{word} = {UPDATE_READY}"),
+                "return".into(),
+            ]
+        );
+        assert!(crate::card::REQUEST_FILE.ends_with("/COMMIT.REQ"));
+        assert!(crate::card::JOURNAL_FILE.ends_with("/COMMIT.TTL"));
+    }
+
+    /// The interpreter stops at a variable that has the name of a label
+    /// ("Type mismatch"): no script names a variable as a label.
+    #[test]
+    fn no_script_names_a_variable_as_a_label() {
+        let fast = FastRelease::new(&crate::camera::GR3, "2.21").unwrap();
+        for script in [loader(), loader_with(ICON_STRIDE, &[fast]), resident()] {
+            let text = String::from_utf8(script).unwrap();
+            let labels: std::collections::BTreeSet<&str> = text
+                .lines()
+                .filter_map(|line| line.strip_prefix(':'))
+                .collect();
+            for line in text.lines() {
+                let statement = match line.strip_prefix("if ") {
+                    Some(rest) => rest.splitn(4, ' ').nth(3).unwrap_or_default(),
+                    None => line,
+                };
+                if let Some((target, _)) = statement.split_once(" = ") {
+                    let name = target.split('[').next().unwrap_or_default();
+                    assert!(!labels.contains(name), "{line}");
+                }
+            }
+        }
+    }
+
+    /// The interpreter takes an assignment to an array element only on a line
+    /// of its own: no script assigns one after `if`.
+    #[test]
+    fn no_script_assigns_an_array_element_after_if() {
+        let fast = FastRelease::new(&crate::camera::GR3, "2.21").unwrap();
+        for script in [loader(), loader_with(ICON_STRIDE, &[fast]), resident()] {
+            for line in String::from_utf8(script).unwrap().lines() {
+                let Some(rest) = line.strip_prefix("if ") else {
+                    continue;
+                };
+                let statement = rest.splitn(4, ' ').nth(3).unwrap_or_default();
+                let target = statement.split(" = ").next().unwrap_or_default();
+                assert!(
+                    !(statement.contains(" = ") && target.contains('[')),
+                    "{line}"
+                );
+            }
+        }
+    }
+
     /// The main file follows only its immutable content revision. Other
     /// files and temporary U-mode changes cannot starve its debounce.
     #[test]
     fn the_resident_script_saves_after_the_selections_settle() {
         let script = state_script();
         let start = at(&script, ":watch");
-        assert_eq!(script[start + 2], "call capture");
+        assert_eq!(script[start + 4], "call capture");
         assert!(!script
             .iter()
             .any(|line| line.contains("hold") || line.contains("total =")));
@@ -1400,7 +1736,8 @@ mod tests {
     }
 
     /// The state files are in the data folder, which holds the loader. Without
-    /// the folder, no save writes.
+    /// the folder, no save writes. The one other write renames the journal of
+    /// a confirmed update over Wi-Fi in the package folder (`update_script`).
     #[test]
     fn the_loader_saves_in_the_data_folder() {
         let script = state_script();
@@ -1414,9 +1751,12 @@ mod tests {
                 format!("if stateok = 0 goto save_{}_end", label(file))
             );
         }
+        let update = "filerename 'C:\\SCRIPT\\GRKIT\\COMMIT.REQ' 'C:\\SCRIPT\\GRKIT\\COMMIT.TTL'";
+        assert_eq!(script.iter().filter(|l| *l == update).count(), 1);
         let writes: Vec<_> = script
             .iter()
             .filter(|l| l.starts_with("filecreate") || l.starts_with("filerename"))
+            .filter(|l| *l != update)
             .collect();
         assert_eq!(writes.len(), 2 * StateFile::ALL.len());
         assert!(

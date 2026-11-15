@@ -4,7 +4,9 @@ mod storage;
 
 use anyhow::{ensure, Context, Result};
 use clap::{Parser, Subcommand};
-use grkit_core::{cube::Encoding, effects, fit, language::Language, packaging, site, Files};
+use grkit_core::{
+    cube::Encoding, effects, fit, language::Language, packaging, release, site, Files,
+};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
@@ -43,6 +45,12 @@ enum Command {
         clang: String,
         #[arg(long, default_value = "ld.lld")]
         lld: String,
+        /// SERVE.BIN of the runtime: the service on the camera's Linux, which
+        /// `cargo build -p grkit-serve --profile serve --target
+        /// armv7-unknown-linux-musleabi` makes. Without it, the runtime has
+        /// no service.
+        #[arg(long)]
+        serve: Option<PathBuf>,
     },
     /// Build a module file (.GRM) from C sources that include runtime/sdk/grkit.h.
     Module {
@@ -111,6 +119,34 @@ enum Command {
         /// `--language`. `grkit guides` writes its source.
         #[arg(long)]
         guide: PathBuf,
+        /// The folder of the signed statement of the release for the camera
+        /// (`grkit sign`). The service on the camera installs a package over
+        /// Wi-Fi only with it.
+        #[arg(long)]
+        release: Option<PathBuf>,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Write a new signing key for the releases: the 32-byte seed as
+    /// hexadecimal digits, readable only by the owner. Prints its public key.
+    Key {
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Sign the release for a camera: write RELEASE.JSON, the SHA-256 of each
+    /// runtime file of its package and of each official module, and
+    /// RELEASE.SIG to OUT. The key is the hexadecimal seed in the environment
+    /// variable GRKIT_SIGNING_KEY.
+    Sign {
+        /// The runtime build of each firmware build of the camera, in release
+        /// order, as for `grkit package`.
+        #[arg(long, required = true)]
+        build: Vec<PathBuf>,
+        /// Each official module file (.GRM) of the release.
+        #[arg(long = "module", required = true)]
+        modules: Vec<PathBuf>,
+        #[arg(long, value_parser = grkit_core::camera::CAMERAS.map(|camera| camera.id))]
+        camera: String,
         #[arg(long)]
         out: PathBuf,
     },
@@ -344,9 +380,17 @@ fn run(command: Command) -> Result<Value> {
             out,
             clang,
             lld,
+            serve,
         } => {
             let target = grkit_build::target::find(&target)?;
-            let result = grkit_build::build_runtime(target, &firmware, &out, &clang, &lld)?;
+            let result = grkit_build::build_runtime(
+                target,
+                &firmware,
+                &out,
+                &clang,
+                &lld,
+                serve.as_deref(),
+            )?;
             Ok(
                 json!({"output": result.output, "target": result.manifest["target"], "files": result.files.len()}),
             )
@@ -606,6 +650,7 @@ fn run(command: Command) -> Result<Value> {
             camera,
             language,
             guide,
+            release,
             out,
         } => {
             let runtimes = build
@@ -623,7 +668,15 @@ fn run(command: Command) -> Result<Value> {
                 .iter()
                 .map(|path| storage::read_bounded(path, packaging::MAX_FILE_SIZE))
                 .collect::<Result<Vec<_>>>()?;
-            let package = packaging::assemble(
+            let release = release
+                .map(|folder| -> Result<_> {
+                    Ok((
+                        storage::read_bounded(&folder.join(release::STATEMENT_ENTRY), 1024 * 1024)?,
+                        storage::read_bounded(&folder.join(release::SIGNATURE_ENTRY), 1024)?,
+                    ))
+                })
+                .transpose()?;
+            let package = packaging::assemble_with(
                 &runtimes,
                 &effects,
                 &modules,
@@ -632,13 +685,66 @@ fn run(command: Command) -> Result<Value> {
                     language,
                     pdf: &pdf,
                 },
+                packaging::Extras {
+                    release: release
+                        .as_ref()
+                        .map(|(statement, signature)| (statement.as_slice(), signature.as_slice())),
+                    ..packaging::Extras::default()
+                },
             )?;
             storage::write_new(&out, &package.bytes)?;
             let contents = package.contents;
             Ok(
                 json!({"path": out, "sha256": packaging::sha256(&package.bytes),
                 "camera": contents.camera.id, "entries": contents.entries,
-                "modules": contents.modules, "language": contents.language.code()}),
+                "modules": contents.modules, "language": contents.language.code(),
+                "signed": signed(&package.bytes)?}),
+            )
+        }
+        Command::Key { out } => {
+            let mut seed = [0u8; 32];
+            std::fs::File::open("/dev/urandom")
+                .and_then(|mut random| std::io::Read::read_exact(&mut random, &mut seed))
+                .context("Read random bytes for the key")?;
+            let seed = hex::encode(seed);
+            let key = release::SigningKey::from_hex(&seed)?;
+            storage::write_secret(&out, format!("{seed}\n").as_bytes())?;
+            Ok(json!({"path": out, "public_key": hex::encode(key.public_key())}))
+        }
+        Command::Sign {
+            build,
+            modules,
+            camera,
+            out,
+        } => {
+            let key = release::SigningKey::from_hex(
+                &std::env::var("GRKIT_SIGNING_KEY")
+                    .context("Set GRKIT_SIGNING_KEY to the signing key")?,
+            )?;
+            let runtimes = build
+                .iter()
+                .map(|build| storage::load_build(build))
+                .collect::<Result<Vec<_>>>()?;
+            let modules = modules
+                .iter()
+                .map(|path| storage::read_bounded(path, packaging::MAX_FILE_SIZE))
+                .collect::<Result<Vec<_>>>()?;
+            let camera = grkit_core::camera::find(&camera)?;
+            let statement = release::Statement::of_release(&runtimes, &modules, camera)?;
+            let bytes = statement.to_bytes()?;
+            let signature = key.sign(&bytes);
+            storage::write_directory(
+                &out,
+                &Files::from([
+                    (release::STATEMENT_ENTRY.to_owned(), bytes),
+                    (release::SIGNATURE_ENTRY.to_owned(), signature),
+                ]),
+            )?;
+            Ok(
+                json!({"path": out, "camera": camera.id, "version": statement.version,
+                "runtime": statement.runtime.len(), "modules": statement.modules.len(),
+                "public_key": hex::encode(key.public_key()),
+                "official": release::OFFICIAL_KEYS.contains(&key.public_key())}),
             )
         }
         Command::Guides { out } => {
@@ -703,7 +809,8 @@ fn run(command: Command) -> Result<Value> {
             Ok(
                 json!({"valid": true, "camera": contents.camera.id, "targets": contents.targets,
                 "effects": contents.effect_ids.len(),
-                "modules": contents.modules, "language": contents.language.code()}),
+                "modules": contents.modules, "language": contents.language.code(),
+                "signed": signed(&bytes)?}),
             )
         }
         Command::ScriptsOff { camera, out } => {
@@ -753,5 +860,16 @@ fn main() -> std::process::ExitCode {
             eprintln!("grkit: {error:#}");
             std::process::ExitCode::FAILURE
         }
+    }
+}
+
+/// The signature of a package: `"official"` when an official key signed
+/// it, or `false` without a signature. A signature of another key, or of
+/// other files, is an error.
+fn signed(package: &[u8]) -> Result<Value> {
+    match release::verify_update(package, &release::OFFICIAL_KEYS) {
+        Ok(_) => Ok(json!("official")),
+        Err(error) if format!("{error:#}").contains("is not signed") => Ok(json!(false)),
+        Err(error) => Err(error.context("Check the release signature")),
     }
 }

@@ -198,6 +198,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ed25519-compact"
+version = "2.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9547879431a90e352a35863a54416d92898a787b9af09e6ae2e09a96bd78be80"
+
+[[package]]
 name = "equivalent"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -262,6 +268,7 @@ dependencies = [
  "grkit-build",
  "grkit-core",
  "grkit-firmware",
+ "hex",
  "serde_json",
  "tempfile",
 ]
@@ -273,6 +280,7 @@ dependencies = [
  "ab_glyph",
  "anyhow",
  "crc32fast",
+ "ed25519-compact",
  "flate2",
  "hex",
  "serde",
@@ -294,6 +302,17 @@ dependencies = [
  "sha2",
  "tempfile",
  "zip",
+]
+
+[[package]]
+name = "grkit-serve"
+version = "1.6.2"
+dependencies = [
+ "anyhow",
+ "grkit-core",
+ "libc",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

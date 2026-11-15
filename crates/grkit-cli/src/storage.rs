@@ -239,3 +239,17 @@ pub fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     Ok(())
 }
+
+/// `write_new`, for a file that only its owner can read, such as a key.
+pub fn write_secret(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    create_parent(path)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("Cannot create new file {}", path.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("Cannot write {}", path.display()))
+}

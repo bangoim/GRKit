@@ -251,13 +251,13 @@ static void slot_name_set(unsigned slot, unsigned name, unsigned registered)
 #define DIAL_SLOT_ASSIGN(u,slot) (++slot_assigns, slot_assign_saves = slot_saves, slot_of[(u)] = (slot))
 /* A change of the controller, as to the keyboard, which the test records. */
 #undef FW_CHANGE_CONTROLLER
-static unsigned controller_changes, controller_from, controller_to;
+static unsigned controller_changes, controller_from, controller_to, controller_arg;
 static unsigned change_controller(unsigned from, unsigned to, unsigned arg)
 {
-    (void)arg;
     ++controller_changes;
     controller_from = from;
     controller_to = to;
+    controller_arg = arg;
     return 0;
 }
 #define FW_CHANGE_CONTROLLER change_controller
@@ -5272,6 +5272,54 @@ static void the_section_rows_follow_the_listed_modules(void)
     menu_tabs[MENU_TAB_GRKIT] = TEST_TAB;
     menu_rows_install(h);
     assert(menu_tabs[MENU_TAB_GRKIT] == TEST_TAB && factory_calls == 1);
+    /* An update over Wi-Fi that waits shows Update first in GRKit
+       Settings, and About GRKit reads Update and its version and opens the
+       same page. OK on Install asks in a confirm box; Cancel keeps the update
+       waiting, Execute confirms it and returns, as MENU does, to the page
+       that opened the value page. Then it and About GRKit read Restart to
+       apply. The test cannot show the box, so it calls its return. */
+    h[GRKIT_HOST_UPDATE / 4] = GRKIT_UPDATE_WAITING;
+    h[GRKIT_HOST_UPDATE_VERSION / 4] = 1U << 16 | 7U << 8 | 12U;
+    assert(same(grkit_value(h), "Update 1.7.12"));
+    assert(menu_rows_controller(h, MENU_ROW_TARGET) == SETTINGS_SUBMENU);
+    assert(settings_rows(h) == 3 && same(core_page_settings[0].label(h), "Update") &&
+           same(core_page_settings[1].label(h), "Mode Dial"));
+    const Setting *update = core_row_setting(h, 0);
+    assert(update == &update_setting && update->flags == SETTING_OWN_PAGE);
+    assert(same(update->title(h), "Update 1.7.12") && update->values(h) == 2 && update->get(h) == 0 &&
+           same(update->value_text(h, 0), "Later") && same(update->value_text(h, 1), "Install"));
+    assert(!update->select(h, TEST_OBJECTS + 0x800U, 0));
+    assert(update->select(h, TEST_OBJECTS + 0x800U, UPDATE_INSTALL));
+    assert(same((const u16 *)recipe_text_at(h, RECIPE_BOX_AT), "Install GRKit 1.7.12?"));
+    volatile u32 *check = services_word(h, SERVICES_CHECK);
+    check[CHECK_SETTING / 4] = 0;
+    check[CHECK_RADIO / 4] = TEST_OBJECTS + 0x800U;
+    check[CHECK_ID / 4] = settings_pages[0];
+    MENU_OBJECT_WORD(TEST_OBJECTS + 0x800U, SETTINGS_RETURN_TARGET) = MENU_RETURN_CONTROLLER;
+    controller_changes = 0;
+    update_box_done(0, 0);
+    assert(h[GRKIT_HOST_UPDATE / 4] == GRKIT_UPDATE_WAITING && !controller_changes);
+    update_box_done(1, 0);
+    assert(controller_changes == 1 && controller_from == TEST_OBJECTS + 0x800U &&
+           controller_to == MENU_RETURN_CONTROLLER && controller_arg == CONTROLLER_BACK);
+    /* From GRKit Settings, the value page returns there. */
+    h[GRKIT_HOST_UPDATE / 4] = GRKIT_UPDATE_WAITING;
+    MENU_OBJECT_WORD(TEST_OBJECTS + 0x800U, SETTINGS_RETURN_TARGET) = SETTINGS_SUBMENU;
+    update_box_done(1, 0);
+    assert(controller_changes == 2 && controller_to == SETTINGS_SUBMENU);
+    MENU_OBJECT_WORD(TEST_OBJECTS + 0x800U, SETTINGS_RETURN_TARGET) = 0;
+    check[CHECK_RADIO / 4] = check[CHECK_ID / 4] = 0;
+    assert(h[GRKIT_HOST_UPDATE / 4] == GRKIT_UPDATE_CONFIRMED && update->get(h) == UPDATE_INSTALL &&
+           same(update->value_text(h, 1), "Restart to apply") && same(grkit_value(h), "Restart to apply"));
+    /* A confirmed update asks nothing more. */
+    assert(!update->select(h, TEST_OBJECTS + 0x800U, UPDATE_INSTALL));
+    h[GRKIT_HOST_UPDATE / 4] = GRKIT_UPDATE_READY;
+    assert(same(grkit_value(h), "Restart to apply"));
+    /* Without a version, the texts leave it out. */
+    h[GRKIT_HOST_UPDATE / 4] = GRKIT_UPDATE_WAITING;
+    h[GRKIT_HOST_UPDATE_VERSION / 4] = 0;
+    assert(same(grkit_value(h), "Update"));
+    h[GRKIT_HOST_UPDATE / 4] = 0;
     /* GRKit Settings has Mode Dial, then ADJ Order, which opens its page;
        MENU there returns to GRKit Settings. */
     assert(menu_rows_controller(h, MENU_ROW_TARGET) == SETTINGS_SUBMENU);

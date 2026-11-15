@@ -215,7 +215,10 @@
 #define RECIPE_SUMMARY_AT (RECIPE_ROWS_MAX * RECIPE_TEXT_SIZE)
 #define RECIPE_BOX_AT (RECIPE_SUMMARY_AT + RECIPE_TEXT_SIZE)
 #define RECIPE_BOX_TABLE_AT (RECIPE_BOX_AT + RECIPE_TEXT_SIZE)
-#define RECIPE_SERVICES_SIZE (RECIPE_BOX_TABLE_AT + 4U * GRKIT_TEXT_LANGUAGES)
+/* The value of About GRKit and the title of its page while an update over
+   Wi-Fi waits: Update and its version (runtime/menu_settings.h). */
+#define RECIPE_UPDATE_AT (RECIPE_BOX_TABLE_AT + 4U * GRKIT_TEXT_LANGUAGES)
+#define RECIPE_SERVICES_SIZE (RECIPE_UPDATE_AT + RECIPE_TEXT_SIZE)
 /* The entry of the menu component for the shooting screen (runtime/menu.c:
    menu_viewfinder), which INSTALL writes: the framing component calls it
    in the App task with an event, as the components link apart: the first
