@@ -5,6 +5,8 @@
 /dist/
 /build/
 /target/
+/app/target/
+/app/.nsh/
 *.bin
 *.raw
 *.zip

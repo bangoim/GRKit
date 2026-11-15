@@ -1,0 +1,25 @@
+[package]
+name = "grkit-app"
+version = "1.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+nsh-core = { version = "0.5.1", features = ["svg"] }
+nsh-base = "0.5.1"
+env_logger = "0.11"
+log = "0.4"
+# Reserved for a later task that talks to the package on the camera.
+grkit-core = { path = "../crates/grkit-core" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nsh-platform-macos = { version = "0.5.1", default-features = false }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+nsh-platform-ios = { version = "0.5.1", default-features = false }
+
+[dev-dependencies]
+nsh-engine = "0.5.1"
+nsh-testing = "0.5.1"

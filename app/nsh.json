@@ -1,0 +1,15 @@
+{
+  "name": "GRKit",
+  "id": "studio.techflow.grkit",
+  "version": "1.0.0",
+  "build": 1,
+  "rust": ".",
+  "root": "App",
+  "theme": "theme.json",
+  "appearance": "system",
+  "capabilities": {
+    "openUrl": {
+      "schemes": ["https", "itms-apps"]
+    }
+  }
+}

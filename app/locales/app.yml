@@ -1,0 +1,267 @@
+_version: 2
+
+tab.camera:
+  en: Camera
+  zh-CN: 相机
+tab.settings:
+  en: Settings
+  zh-CN: 设置
+
+home.title:
+  en: Add Your Camera
+  zh-CN: 添加你的相机
+home.subtitle:
+  en: Update GRKit over Wi-Fi.
+  zh-CN: 通过 Wi-Fi 更新 GRKit。
+home.add:
+  en: Add Camera
+  zh-CN: 添加相机
+home.footnote:
+  en: Needs GRKit 1.7.0 or later on the camera.
+  zh-CN: 相机上需要 GRKit 1.7.0 或更高版本。
+
+nearby.title_suffix:
+  en: ""
+  zh-CN: ""
+nearby.powered_on:
+  en: Powered on
+  zh-CN: 已开机
+nearby.hint:
+  en: "First time with this camera? On the camera, select Bluetooth Setting → Pairing → Execute Pairing"
+  zh-CN: 首次连接？请在相机上选择“蓝牙设置 → 配对 → 执行配对”
+nearby.connect:
+  en: Connect
+  zh-CN: 连接
+nearby.not_now:
+  en: Not Now
+  zh-CN: 暂不
+
+scan.title:
+  en: Add a Camera
+  zh-CN: 添加相机
+scan.subtitle:
+  en: Keep it close by, with Bluetooth on.
+  zh-CN: 请保持相机在附近，并打开蓝牙。
+scan.looking:
+  en: Looking for cameras
+  zh-CN: 正在查找相机
+scan.hint:
+  en: "First time? On the camera: Bluetooth Setting → Pairing → Execute Pairing"
+  zh-CN: 首次连接？在相机上：蓝牙设置 → 配对 → 执行配对
+scan.close:
+  en: Close
+  zh-CN: 关闭
+
+connecting.title:
+  en: Connecting to %{model}
+  zh-CN: 正在连接 %{model}
+connecting.keep_on:
+  en: Keep the camera on and nearby.
+  zh-CN: 请保持相机开机并在附近。
+connecting.bt:
+  en: Connect over Bluetooth
+  zh-CN: 通过蓝牙连接
+connecting.wifi:
+  en: Join the camera's Wi-Fi
+  zh-CN: 加入相机的 Wi-Fi
+connecting.wifi_sub:
+  en: If iOS asks, allow it.
+  zh-CN: 若系统询问，请允许。
+connecting.version:
+  en: Read GRKit version
+  zh-CN: 读取 GRKit 版本
+
+connected.status:
+  en: Connected
+  zh-CN: 已连接
+connected.whats_new:
+  en: What's New
+  zh-CN: 新功能
+connected.update:
+  en: Update
+  zh-CN: 更新
+connected.grkit:
+  en: GRKit
+  zh-CN: GRKit
+connected.firmware:
+  en: Firmware
+  zh-CN: 固件
+connected.up_to_date:
+  en: GRKit Is Up to Date
+  zh-CN: GRKit 已是最新
+connected.software_update:
+  en: Software Update
+  zh-CN: 软件更新
+
+software.title:
+  en: Software Update
+  zh-CN: 软件更新
+software.installed:
+  en: Installed
+  zh-CN: 已安装
+software.looks_stay:
+  en: Your looks and settings stay.
+  zh-CN: 你的效果和设置会保留。
+software.roll_back_to:
+  en: Roll Back to %{version}
+  zh-CN: 回退到 %{version}
+software.roll_footnote:
+  en: Available until the next update.
+  zh-CN: 在下次更新前可用。
+software.update_now:
+  en: Update Now
+  zh-CN: 立即更新
+software.confirm_note:
+  en: Confirm on the camera, then restart it.
+  zh-CN: 请在相机上确认，然后重启相机。
+software.up_to_date:
+  en: GRKit is up to date
+  zh-CN: GRKit 已是最新
+software.learn_more:
+  en: Learn More…
+  zh-CN: 了解更多…
+
+sending.title:
+  en: Updating %{model}
+  zh-CN: 正在更新 %{model}
+sending.progress:
+  en: Sending to your camera…
+  zh-CN: 正在发送到相机…
+sending.step_send:
+  en: Send to camera
+  zh-CN: 发送到相机
+sending.step_confirm:
+  en: Confirm on camera
+  zh-CN: 在相机上确认
+sending.step_restart:
+  en: Restart camera
+  zh-CN: 重启相机
+sending.keep_on:
+  en: Keep the camera on.
+  zh-CN: 请保持相机开机。
+sending.cancel:
+  en: Cancel
+  zh-CN: 取消
+
+confirm.title:
+  en: Confirm on the Camera
+  zh-CN: 在相机上确认
+confirm.subtitle:
+  en: The update is on the camera and verified.
+  zh-CN: 更新已在相机上并通过校验。
+confirm.step1:
+  en: MENU → About GRKit
+  zh-CN: 菜单 → 关于 GRKit
+confirm.step2:
+  en: Choose Install
+  zh-CN: 选择安装
+confirm.step3:
+  en: Choose Execute
+  zh-CN: 选择执行
+confirm.waiting:
+  en: Waiting for the camera · %{time}
+  zh-CN: 等待相机 · %{time}
+
+restart.title:
+  en: Restart the Camera
+  zh-CN: 重启相机
+restart.subtitle:
+  en: Turn it off and on. It installs as it starts.
+  zh-CN: 关机再开机。启动时会完成安装。
+restart.done:
+  en: Done
+  zh-CN: 完成
+restart.cancel:
+  en: Cancel Update
+  zh-CN: 取消更新
+
+installed.title:
+  en: GRKit %{version} Is Installed
+  zh-CN: GRKit %{version} 已安装
+installed.subtitle:
+  en: You can roll back to %{previous} in Software Update.
+  zh-CN: 可在“软件更新”中回退到 %{previous}。
+installed.done:
+  en: Done
+  zh-CN: 完成
+
+roll.alert_title:
+  en: Roll Back to GRKit %{version}?
+  zh-CN: 回退到 GRKit %{version}？
+roll.alert_body:
+  en: Confirm on the camera, then restart it.
+  zh-CN: 请在相机上确认，然后重启相机。
+roll.confirm:
+  en: Roll Back
+  zh-CN: 回退
+roll.cancel:
+  en: Cancel
+  zh-CN: 取消
+roll.confirm_title:
+  en: Confirm Roll Back on the Camera
+  zh-CN: 在相机上确认回退
+roll.confirm_subtitle:
+  en: Then restart the camera.
+  zh-CN: 然后重启相机。
+
+error.card_full_title:
+  en: Card Is Full
+  zh-CN: 存储卡已满
+error.card_full_body:
+  en: Free %{size}, then try again.
+  zh-CN: 请先腾出 %{size}，然后重试。
+error.not_confirmed_title:
+  en: Not Confirmed
+  zh-CN: 未确认
+error.not_confirmed_body:
+  en: Confirm within 5 minutes. Nothing changed.
+  zh-CN: 请在 5 分钟内确认。相机未改动。
+error.refused_title:
+  en: Update Refused
+  zh-CN: 更新被拒绝
+error.refused_body:
+  en: The camera refused the update. Nothing changed.
+  zh-CN: 相机拒绝了此次更新。未改动。
+error.lost_title:
+  en: Connection Lost
+  zh-CN: 连接已断开
+error.lost_body:
+  en: The link dropped. Nothing changed on the camera.
+  zh-CN: 连接中断。相机未改动。
+error.try_again:
+  en: Try Again
+  zh-CN: 重试
+error.send_again:
+  en: Send Again
+  zh-CN: 重新发送
+error.close:
+  en: Close
+  zh-CN: 关闭
+
+settings.title:
+  en: Settings
+  zh-CN: 设置
+settings.about:
+  en: About
+  zh-CN: 关于
+settings.version:
+  en: Version
+  zh-CN: 版本
+settings.rate:
+  en: Rate GRKit
+  zh-CN: 为 GRKit 评分
+settings.privacy:
+  en: Privacy Policy
+  zh-CN: 隐私政策
+settings.more_maker:
+  en: More from the Maker
+  zh-CN: 来自同一作者
+settings.gr_snap_name:
+  en: GR Snap
+  zh-CN: GR Snap
+settings.gr_snap_desc:
+  en: Wireless transfer and remote for RICOH GR
+  zh-CN: RICOH GR 的无线传输与遥控
+settings.view:
+  en: View
+  zh-CN: 查看
