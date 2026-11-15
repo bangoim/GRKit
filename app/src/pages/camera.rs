@@ -12,17 +12,42 @@ pub fn camera_root(app: AppState) -> impl IntoElement {
     // Each camera state supplies its own header.
     // The stack still pushes Software Update with a system back button.
     nav_page().header_visible(false).child(dynamic(move || {
+        if app.initial_connect() {
+            return connecting_home().into_element();
+        }
         let status = app.status();
         match status {
-            Some(s) => connected(
-                app.clone(),
-                s.camera.model,
-                s.camera.connection == ConnectionState::Connected,
-            )
-            .into_element(),
+            Some(s) => untracked(|| {
+                connected(
+                    app,
+                    s.camera.model,
+                    s.camera.connection == ConnectionState::Connected,
+                )
+                .into_element()
+            }),
             _ => empty_home(app.clone()).into_element(),
         }
     }))
+}
+
+fn connecting_home() -> impl IntoElement {
+    scroll().flex_1().bg(move || token("grouped")).child(
+        view()
+            .px_6()
+            .pt(px(72.0))
+            .gap_4()
+            .child(
+                view()
+                    .gap_2()
+                    .child(view().w(px(28.0)).h(px(3.0)).bg(move || token("tint")))
+                    .child(
+                        text("GRKit")
+                            .text_size(px(28.0))
+                            .font_weight(FontWeight::BOLD),
+                    ),
+            )
+            .child(crate::ui::camera_skeleton()),
+    )
 }
 
 fn empty_home(app: AppState) -> impl IntoElement {
@@ -96,9 +121,6 @@ fn empty_home(app: AppState) -> impl IntoElement {
 }
 
 fn connected(app: AppState, model: CameraModel, online: bool) -> impl IntoElement {
-    let package = app.package();
-    let update_unknown = !app.demo() && package.as_ref().is_none_or(|p| p.available.is_none());
-    let up_to_date = package.as_ref().is_some_and(is_up_to_date);
     scroll().flex_1().bg(move || token("grouped")).child(
         view()
             .gap_4()
@@ -147,31 +169,39 @@ fn connected(app: AppState, model: CameraModel, online: bool) -> impl IntoElemen
                                     ),
                             ),
                     )
-                    .child(version_card(app.clone())),
+                    .child(dynamic(move || version_card(app))),
             ))
-            .child(if !online {
-                primary_button(tr("nearby.connect", &[]), move || app.start_connect())
-                    .into_element()
-            } else if update_unknown {
-                grouped_card(chevron_row(
-                    tr("connected.software_update", &[]),
-                    Some(tr(
-                        if app.release_checking() {
-                            "software.checking"
-                        } else {
-                            "software.unavailable"
-                        },
-                        &[],
-                    )),
-                    move || app.open_software_update(),
-                ))
-                .into_element()
-            } else if up_to_date {
-                up_to_date_card(app).into_element()
-            } else {
-                update_available_card(app).into_element()
-            }),
+            .child(dynamic(move || update_section(app, online))),
     )
+}
+
+fn update_section(app: AppState, online: bool) -> AnyElement {
+    let package = app.package();
+    let update_unknown = !app.demo() && package.as_ref().is_none_or(|p| p.available.is_none());
+    let up_to_date = package.as_ref().is_some_and(is_up_to_date);
+    if !online {
+        primary_button(tr("nearby.connect", &[]), move || app.start_connect()).into_element()
+    } else if update_unknown && app.release_checking() {
+        crate::ui::update_skeleton().into_element()
+    } else if update_unknown {
+        grouped_card(chevron_row(
+            tr("connected.software_update", &[]),
+            Some(tr(
+                if app.release_checking() {
+                    "software.checking"
+                } else {
+                    "software.unavailable"
+                },
+                &[],
+            )),
+            move || app.open_software_update(),
+        ))
+        .into_element()
+    } else if up_to_date {
+        up_to_date_card(app).into_element()
+    } else {
+        update_available_card(app).into_element()
+    }
 }
 
 fn update_available_card(app: AppState) -> impl IntoElement {

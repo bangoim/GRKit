@@ -1,9 +1,6 @@
 //! Modal sheets for pairing, connecting, update progress, and errors.
 
-use nsh_base::{
-    SheetEvent, carousel, carousel_content, carousel_item, carousel_pagination,
-    carousel_pagination_item, progress, sheet, theme,
-};
+use nsh_base::{SheetEvent, progress, sheet, theme};
 use nsh_core::prelude::*;
 
 use crate::domain::{CameraModel, LinkError, UpdateError, UpdateKind, UpdatePhase};
@@ -545,7 +542,6 @@ fn confirm(app: AppState) -> impl IntoElement {
     } else {
         tr("confirm.subtitle", &[])
     };
-    let index = signal(0u32);
     sheet_shell(
         title,
         Some(subtitle),
@@ -555,31 +551,7 @@ fn confirm(app: AppState) -> impl IntoElement {
         view()
             .w_full()
             .gap_4()
-            .child(
-                carousel()
-                    .index(move || Some(index.get()))
-                    .on_change(move |i: &u32| index.set(*i))
-                    .gap(px(12.0))
-                    .accessibility_label("Steps on the camera")
-                    .child(
-                        carousel_content()
-                            .mx(px(-20.0))
-                            .px(px(26.0))
-                            .gap(px(12.0))
-                            .child(step_slide(STEP1, 1, tr("confirm.step1", &[])))
-                            .child(step_slide(STEP2, 2, tr("confirm.step2", &[])))
-                            .child(step_slide(STEP3, 3, tr("confirm.step3", &[]))),
-                    )
-                    .child(
-                        carousel_pagination()
-                            .flex_row()
-                            .justify_center()
-                            .gap(px(7.0))
-                            .child(page_dot(0))
-                            .child(page_dot(1))
-                            .child(page_dot(2)),
-                    ),
-            )
+            .child(installation_steps())
             .child(
                 view()
                     .w_full()
@@ -605,56 +577,119 @@ fn confirm(app: AppState) -> impl IntoElement {
     )
 }
 
-fn page_dot(i: u32) -> impl IntoElement {
-    carousel_pagination_item()
-        .index(i)
-        .size(px(7.0))
-        .rounded_full()
-        .bg(rgb(0xC7C7CC))
-        .selected_style(|s| s.bg(move || token("tint")))
+// The guide has a fixed cross-axis extent. Native iOS scroll views can otherwise
+// move vertically when their content exceeds their height, even in horizontal mode.
+const GUIDE_WIDTH: f32 = 300.0;
+const GUIDE_HEIGHT: f32 = 258.0;
+const GUIDE_STRIDE: f32 = GUIDE_WIDTH + 12.0;
+
+fn installation_steps() -> impl IntoElement {
+    let index = signal(0u32);
+    let track = element_ref();
+    view()
+        .gap_1()
+        .child(
+            scroll()
+                .element_ref(&track)
+                .horizontal()
+                .scrollbar(false)
+                .bounces(false)
+                .snap_interval(Points(GUIDE_STRIDE))
+                .disable_interval_momentum(true)
+                .deceleration(0.99)
+                .h(px(GUIDE_HEIGHT))
+                .mx(px(-20.0))
+                .px(px(26.0))
+                .gap(px(12.0))
+                .label("Steps on the camera")
+                .on_scroll_end(move |offset: &Point<Points>| {
+                    index.set((offset.x.0 / GUIDE_STRIDE).round().clamp(0.0, 2.0) as u32);
+                })
+                .child(step_slide(STEP1, 1, tr("confirm.step1", &[])))
+                .child(step_slide(STEP2, 2, tr("confirm.step2", &[])))
+                .child(step_slide(STEP3, 3, tr("confirm.step3", &[]))),
+        )
+        .child(
+            view()
+                .flex_row()
+                .justify_center()
+                .child(page_dot(0, index, track))
+                .child(page_dot(1, index, track))
+                .child(page_dot(2, index, track)),
+        )
+}
+
+fn page_dot(i: u32, index: Signal<u32>, track: ElementRef) -> impl IntoElement {
+    let caption_key = ["confirm.step1", "confirm.step2", "confirm.step3"][i as usize];
+    view()
+        .size(px(44.0))
+        .items_center()
+        .justify_center()
+        .role(AccessibilityRole::Button)
+        .label(format!("{}: {}", i + 1, tr(caption_key, &[])))
+        .on_press(move || {
+            index.set(i);
+            track.scroll_to_offset(Points(i as f32 * GUIDE_STRIDE), !reduce_motion());
+        })
+        .child(view().size(px(7.0)).rounded_full().bg(move || {
+            if index.get() == i {
+                token("tint")
+            } else {
+                rgb(0xC7C7CC).into()
+            }
+        }))
 }
 
 fn step_slide(asset: ImageAsset, number: u8, caption: String) -> impl IntoElement {
-    carousel_item().w(px(300.0)).child(
-        view()
-            .gap(px(10.0))
-            .child(
-                view().p(px(6.0)).rounded(px(10.0)).bg(rgb(0x111113)).child(
-                    image(asset)
-                        .w_full()
-                        .aspect_ratio(3.0 / 2.0)
-                        .rounded(px(16.0))
-                        .object_fit(ResizeMode::Cover),
-                ),
-            )
-            .child(
-                view()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(10.0))
-                    .px_1()
-                    .child(
-                        view()
-                            .size(px(24.0))
-                            .rounded_full()
-                            .items_center()
-                            .justify_center()
-                            .bg(move || token("tint"))
-                            .child(
-                                text(format!("{number}"))
-                                    .text_size(px(13.0))
-                                    .line_height(px(18.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(move || theme().background),
-                            ),
-                    )
-                    .child(
-                        text(caption)
-                            .text_size(px(17.0))
-                            .font_weight(FontWeight::MEDIUM),
+    view()
+        .w(px(GUIDE_WIDTH))
+        .h(px(GUIDE_HEIGHT))
+        .overflow_hidden()
+        .flex_shrink_0()
+        .child(
+            view()
+                .gap(px(10.0))
+                .child(
+                    view().p(px(6.0)).rounded(px(10.0)).bg(rgb(0x111113)).child(
+                        image(asset)
+                            .w_full()
+                            .aspect_ratio(3.0 / 2.0)
+                            .rounded(px(16.0))
+                            .object_fit(ResizeMode::Cover),
                     ),
-            ),
-    )
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .h(px(44.0))
+                        .items_center()
+                        .gap(px(10.0))
+                        .px_1()
+                        .child(
+                            view()
+                                .size(px(24.0))
+                                .rounded_full()
+                                .items_center()
+                                .justify_center()
+                                .bg(move || token("tint"))
+                                .child(
+                                    text(format!("{number}"))
+                                        .text_size(px(13.0))
+                                        .line_height(px(18.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(move || theme().background),
+                                ),
+                        )
+                        .child(
+                            text(caption)
+                                .flex_1()
+                                .line_height(px(22.0))
+                                .number_of_lines(2u32)
+                                .text_size(px(17.0))
+                                .font_weight(FontWeight::MEDIUM),
+                        ),
+                ),
+        )
 }
 
 fn restart(app: AppState) -> impl IntoElement {

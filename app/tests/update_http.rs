@@ -82,6 +82,13 @@ fn json_response(body: serde_json::Value) -> StubResponse {
 }
 
 fn start_phone(environment: &TestEnvironment) -> (Headless, Arc<Mutex<Camera>>, Arc<StubNetwork>) {
+    start_phone_with_delay(environment, Duration::ZERO)
+}
+
+fn start_phone_with_delay(
+    environment: &TestEnvironment,
+    delay: Duration,
+) -> (Headless, Arc<Mutex<Camera>>, Arc<StubNetwork>) {
     let camera = Arc::new(Mutex::new(Camera {
         version: "1.7.0",
         journal: "none",
@@ -123,7 +130,9 @@ fn start_phone(environment: &TestEnvironment) -> (Headless, Arc<Mutex<Camera>>, 
                 request.method, request.url
             ),
         };
-        reply.send(json_response(body));
+        let mut response = json_response(body);
+        response.delay = delay;
+        reply.send(response);
     }));
     let mut release_missing = StubResponse::default();
     release_missing.status = 404;
@@ -239,4 +248,18 @@ fn stale_rollback_selection_does_not_mutate_the_camera() {
     )
     .unwrap();
     assert!(!network.requests().iter().any(|r| r.method == "PUT"));
+}
+
+#[test]
+fn automatic_connection_starts_with_a_local_placeholder() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let environment = TestEnvironment::new();
+    let (mut app, _, _) = start_phone_with_delay(&environment, Duration::from_millis(300));
+    app.wait_for("Connecting to your camera…").unwrap();
+    app.wait_for_gone("Add Your Camera", WAIT).unwrap();
+    app.wait_for_gone("Connecting to RICOH GR III", WAIT)
+        .unwrap();
+    app.wait_for_within("Software Update", WAIT).unwrap();
+    app.wait_for_gone("Connecting to your camera…", WAIT)
+        .unwrap();
 }

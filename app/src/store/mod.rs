@@ -73,6 +73,7 @@ pub struct AppState {
     pub(crate) confirm_deadline: Signal<Option<Instant>>,
     confirm_tick: Signal<u64>,
     connect_started: Signal<Option<Instant>>,
+    initial_connect: Signal<bool>,
     /// When true, the ticker does not advance connecting / update sheets.
     frozen: Signal<bool>,
     /// Fake camera for demo mode; mutated from tick handlers.
@@ -141,6 +142,7 @@ impl AppState {
             confirm_deadline: signal(None),
             confirm_tick: signal(0),
             connect_started: signal(None),
+            initial_connect: signal(!demo && platform::has_dev_camera_url()),
             frozen: signal(false),
             camera: stored(RefCell::new(camera)),
             baseline: signal(None),
@@ -171,6 +173,10 @@ impl AppState {
             });
         }
         app
+    }
+
+    pub fn initial_connect(self) -> bool {
+        self.initial_connect.get()
     }
 
     pub fn demo(self) -> bool {
@@ -474,7 +480,9 @@ impl AppState {
             return;
         }
         self.set_frozen(false);
-        self.sheet.set(Some(Sheet::Connecting { step: 0 }));
+        if !self.initial_connect.get() {
+            self.sheet.set(Some(Sheet::Connecting { step: 0 }));
+        }
         self.connect_started.set(Some(Instant::now()));
         let generation = self.connect_generation.get().wrapping_add(1);
         self.connect_generation.set(generation);
@@ -493,6 +501,7 @@ impl AppState {
             })
             .or_else(|| self.remembered.get().map(|r| r.peripheral_id.clone()));
         let Some(peripheral_id) = peripheral_id else {
+            self.initial_connect.set(false);
             self.connect_started.set(None);
             self.sheet
                 .set(Some(Sheet::ConnectError(LinkError::NotNearby)));
@@ -510,8 +519,10 @@ impl AppState {
                     if self.connect_generation.get() != generation {
                         return;
                     }
-                    self.sheet
-                        .set(Some(Sheet::Connecting { step: step.as_u8() }));
+                    if !self.initial_connect.get() {
+                        self.sheet
+                            .set(Some(Sheet::Connecting { step: step.as_u8() }));
+                    }
                 });
                 let result = futures_util::future::Abortable::new(operation, registration).await;
                 if self.connect_generation.get() != generation {
@@ -520,6 +531,7 @@ impl AppState {
                 }
                 self.connect_abort.with(|slot| slot.borrow_mut().take());
                 let result = result.unwrap_or(Err(LinkError::Cancelled));
+                self.initial_connect.set(false);
                 match result {
                     Ok((status, package, remembered)) => {
                         self.status.set(Some(status));
@@ -545,6 +557,7 @@ impl AppState {
 
     /// Fence progress before aborting so late native callbacks cannot reopen the sheet.
     pub fn cancel_connect(self) {
+        self.initial_connect.set(false);
         self.connect_generation
             .update(|generation| *generation = generation.wrapping_add(1));
         self.connect_started.set(None);

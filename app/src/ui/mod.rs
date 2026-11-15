@@ -3,3 +3,6 @@
 mod chrome;
 
 pub use chrome::*;
+
+mod loading;
+pub use loading::{camera_skeleton, update_skeleton};

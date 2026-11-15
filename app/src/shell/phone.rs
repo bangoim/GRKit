@@ -26,15 +26,9 @@ pub fn shell(app: AppState) -> impl IntoElement {
             .position(|(t, _, _)| *t == tab.get())
             .unwrap_or(0) as u32
     };
-    let shown = signal(false);
-    spawn(async move {
-        next_frame().await;
-        next_frame().await;
-        shown.set(true);
-    });
     let mut stacks = view().flex_1();
     for &(t, _, _) in TABS {
-        let hidden = move || !shown.get() || tab.get() != t;
+        let hidden = move || tab.get() != t;
         stacks = stacks.child(
             view()
                 .flex_1()

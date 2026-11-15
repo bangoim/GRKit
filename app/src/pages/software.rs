@@ -50,24 +50,29 @@ fn software_content(app: AppState) -> impl IntoElement {
                     .px_6()
                     .pt_4()
                     .pb_8()
-                    .child(header_card(
-                        if up_to_date {
-                            installed.clone()
-                        } else {
-                            available.clone().unwrap_or_else(|| installed.clone())
-                        },
-                        if up_to_date {
-                            tr("software.up_to_date", &[])
-                        } else if available.is_none() {
-                            tr("software.unavailable", &[])
-                        } else {
-                            mb.as_ref()
-                                .map(|size| format!("{model} · {size}"))
-                                .unwrap_or_else(|| model.clone())
-                        },
-                        notes,
-                        up_to_date,
-                    ))
+                    .child(if available.is_none() && app.release_checking() {
+                        crate::ui::update_skeleton().into_element()
+                    } else {
+                        header_card(
+                            if up_to_date {
+                                installed.clone()
+                            } else {
+                                available.clone().unwrap_or_else(|| installed.clone())
+                            },
+                            if up_to_date {
+                                tr("software.up_to_date", &[])
+                            } else if available.is_none() {
+                                tr("software.unavailable", &[])
+                            } else {
+                                mb.as_ref()
+                                    .map(|size| format!("{model} · {size}"))
+                                    .unwrap_or_else(|| model.clone())
+                            },
+                            notes,
+                            up_to_date,
+                        )
+                        .into_element()
+                    })
                     .child(if up_to_date {
                         view().into_element()
                     } else {
