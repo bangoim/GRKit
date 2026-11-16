@@ -427,14 +427,20 @@ fn runtime_layout_matches_target_capacity() {
     assert_eq!(runtime::MAX_COUNT, 40);
     assert_eq!(
         runtime::layout(0).unwrap(),
-        json!({"words": runtime::HEADER_SIZE / 4, "tail_words": runtime::TAIL_WORDS, "icon_words": [21 * 1602]})
+        json!({
+            "words": (runtime::HEADER_SIZE + 40 * 0x1100) / 4,
+            "record_bank_words": 40 * 0x1100 / 4,
+            "tail_words": runtime::TAIL_WORDS,
+            "icon_words": [64080, 64080, 21 * 1602]
+        })
     );
     assert_eq!(
         runtime::layout(40).unwrap(),
         json!({
             "words": (runtime::HEADER_SIZE + 40 * 0x1100) / 4,
+            "record_bank_words": 40 * 0x1100 / 4,
             "tail_words": runtime::TAIL_WORDS,
-            "icon_words": [64080, 21 * 1602]
+            "icon_words": [64080, 64080, 21 * 1602]
         })
     );
     assert!(runtime::layout(41).is_err());
@@ -451,31 +457,36 @@ fn allocation_includes_host_icons_at_chunk_boundaries() {
             .iter()
             .map(|v| v.as_u64().unwrap() as usize)
             .collect();
-        // The registry holds the header and the records. The tail holds the
+        // The registry reserves a full bank even when the library is empty.
+        // A second bank permits replacement without overwriting readers.
+        // The tail holds the
         // picture scratch, the menu text, the live-view labels, the profile
         // table, and the Toning curves (abi::TAIL_SIZE).
         assert_eq!(
             words * 4,
-            runtime::HEADER_SIZE + count * 0x1100,
+            runtime::HEADER_SIZE + runtime::MAX_COUNT * 0x1100,
             "count {count}"
         );
+        let bank = layout["record_bank_words"].as_u64().unwrap() as usize;
+        assert_eq!(bank * 4, runtime::MAX_COUNT * 0x1100);
+        assert!(bank <= grkit_core::abi::MODULE_ARRAY_WORDS);
         // One TTL array holds the tail: at most 65536 words.
         let tail = layout["tail_words"].as_u64().unwrap() as usize;
         assert_eq!(tail * 4, grkit_core::abi::TAIL_SIZE);
         assert!(tail <= grkit_core::abi::MODULE_ARRAY_WORDS);
         assert_eq!(
             icons.iter().sum::<usize>() * 4,
-            (count + runtime::HOST_ICON_COUNT) * 6408,
+            (2 * runtime::MAX_COUNT + runtime::HOST_ICON_COUNT) * 6408,
             "count {count}"
         );
         assert!(std::iter::once(&words)
             .chain(&icons)
             .all(|v| (1..=65536).contains(v)));
-        // The host icons come first, then the effects, 40 icons in each
+        // The host icons come first, then both effect banks, 40 icons in each
         // chunk. Module tiles follow the effects (runtime/installer.c).
         assert_eq!(
             icons.len(),
-            (count + runtime::HOST_ICON_COUNT).div_ceil(40),
+            (2 * runtime::MAX_COUNT + runtime::HOST_ICON_COUNT).div_ceil(40),
             "count {count}"
         );
     }

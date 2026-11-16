@@ -53,7 +53,7 @@ static GRKIT_MAYBE_UNUSED GRKIT_ICON_COMPACT u32 module_icon_value(volatile u32 
 static GRKIT_MAYBE_UNUSED GRKIT_ICON_COMPACT u32 module_tile_address(volatile u32 *h,u32 id) {
     u32 tile=id-GRKIT_ICON_MODULE_TILE(0),slot,chunk;
     if(tile>=GRKIT_MODULE_TILES_MAX || h[GRKIT_HOST_COUNT/4]>GRKIT_TEXT_RECORDS) return 0;
-    slot=GRKIT_HOST_ICON_COUNT+h[GRKIT_HOST_COUNT/4]+tile;
+    slot=GRKIT_HOST_ICON_COUNT+2U*GRKIT_TEXT_RECORDS+tile;
     chunk=slot*1639U>>16;
     if(chunk>=GRKIT_HOST_ICON_CHUNKS_WORDS || !h[GRKIT_HOST_ICON_CHUNKS/4+chunk]) return 0;
     return h[GRKIT_HOST_ICON_CHUNKS/4+chunk]+(slot-chunk*GRKIT_ICONS_PER_CHUNK)*GRKIT_ICON_STRIDE;

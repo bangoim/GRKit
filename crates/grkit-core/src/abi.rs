@@ -83,14 +83,14 @@ const _: () = assert!(HOST_ICON_COUNT <= ICONS_PER_CHUNK);
 /// one array of 65536 words. The tail is an array of its own.
 pub const MAX_COUNT: usize = 40;
 /// The chunk addresses that the header holds (`GRKIT_HOST_ICON_CHUNKS`).
-pub const ICON_CHUNK_SLOTS: usize = 5;
+pub const ICON_CHUNK_SLOTS: usize = 6;
 
 /// The placeholder for the header address in ARM code. The installer replaces
 /// each literal word with this value by the address of the `registry` array.
 pub const HEADER_REFERENCE: u32 = 0x58012340;
 /// `GRM1`.
 pub const HOST_MAGIC_VALUE: u32 = 0x314d5247;
-pub const HOST_VERSION_VALUE: u32 = 1;
+pub const HOST_VERSION_VALUE: u32 = 2;
 /// The most module pages that the header holds: one for each listed module,
 /// and one for each child of a group page (Glow has a group of two).
 pub const MODULE_PAGES_MAX: usize = 16;
@@ -172,7 +172,12 @@ pub const MANAGE_COPY_WORDS: usize = 3;
 /// The immutable main-state export in the module array. Offsets are bytes.
 /// CORE follows state_keys(), which excludes the final CORE.RECIPE handle.
 pub const PERSIST_CORE_COUNT: usize = capabilities::CAPABILITIES.len() - 1;
-pub const PERSIST_EFFECT_WORDS: usize = 3;
+pub const PERSIST_EFFECT_WORDS: usize = 11;
+/// ID-bound adjustments use separate namespaces from historical native codes.
+pub const LOOK_PARAMETER_KEY_BASE: usize = 991_000_000;
+pub const LOOK_TONING_KEY_BASE: usize = LOOK_PARAMETER_KEY_BASE + 32768;
+pub const LOOK_ID_KEY_BASE: usize = LOOK_TONING_KEY_BASE + 32768;
+pub const PERSIST_EFFECT_CAPACITY: usize = 64;
 pub const PERSIST_MODULE_WORDS: usize = 2;
 packed_fields!(PERSIST_FIELDS, PERSIST_SIZE {
     /// Consumer request ticket, 1..2147483647. Zero means no request.
@@ -186,13 +191,72 @@ packed_fields!(PERSIST_FIELDS, PERSIST_SIZE {
     /// Core state values. TONE is its stable 16-bit ImageTone code.
     PERSIST_CORE: 4 * PERSIST_CORE_COUNT;
     PERSIST_EFFECT_COUNT: 4;
-    /// Each effect: low 15 bits of code, base-9 Fn adjustments, Toning.
-    PERSIST_EFFECTS: 4 * PERSIST_EFFECT_WORDS * MAX_COUNT;
+    /// Each effect: ID hash15, Fn, Toning, and eight packed 7-bit ID words.
+    PERSIST_EFFECTS: 4 * PERSIST_EFFECT_WORDS * PERSIST_EFFECT_CAPACITY;
     PERSIST_MODULE_COUNT: 4;
     /// Each module setting: state ID, value. Zero values must persist too.
     PERSIST_MODULES: 4 * PERSIST_MODULE_WORDS * MODULE_SETTINGS_MAX;
 });
 pub const PERSIST_WORDS: usize = PERSIST_SIZE / 4;
+
+/// Linux-to-App-task mailbox. Offsets are bytes. The runtime owns the
+/// descriptor and result fields; the service owns the request and release.
+/// A new runtime epoch is required before the sequence can be reused.
+pub const CONTROL_MAGIC_VALUE: u32 = 0x47524331;
+pub const CONTROL_VERSION_VALUE: u32 = 3;
+pub const CONTROL_PAYLOAD_BYTES: usize = crate::effects::SIZE_WITH_LEVELS;
+pub const CONTROL_SEQUENCE_MAX: u32 = 0x7fff_ffff;
+pub const CONTROL_EMPTY: u32 = 0;
+pub const CONTROL_ACCEPTED: u32 = 1;
+pub const CONTROL_BAD_CONTEXT: u32 = 16;
+pub const CONTROL_BAD_LENGTH: u32 = 17;
+pub const CONTROL_BAD_DIGEST: u32 = 18;
+pub const CONTROL_CHANGED: u32 = 19;
+pub const CONTROL_UNSUPPORTED: u32 = 20;
+pub const CONTROL_INVALID: u32 = 21;
+pub const CONTROL_BUSY: u32 = 22;
+pub const CONTROL_ATTACH: u32 = 1;
+pub const CONTROL_PING: u32 = 2;
+// Library streams are pinned to a runtime epoch, card identity and generation.
+// Runtime handlers must return UNSUPPORTED until all owner proofs are available.
+pub const CONTROL_SNAPSHOT_BEGIN: u32 = 3;
+pub const CONTROL_SNAPSHOT_READ: u32 = 4;
+pub const CONTROL_SNAPSHOT_END: u32 = 5;
+pub const CONTROL_APPLY_BEGIN: u32 = 6;
+pub const CONTROL_APPLY_WRITE: u32 = 7;
+pub const CONTROL_APPLY_COMMIT: u32 = 8;
+pub const CONTROL_APPLY_ABORT: u32 = 9;
+pub const CONTROL_CARD_IDENTITY: u32 = 10;
+pub const CONTROL_REQUEST_SIZE: usize = 16 + CONTROL_PAYLOAD_BYTES;
+packed_fields!(CONTROL_FIELDS, CONTROL_SIZE {
+    CONTROL_MAGIC: 4;
+    CONTROL_VERSION: 4;
+    CONTROL_CAPACITY: 4;
+    CONTROL_EPOCH: 16;
+    CONTROL_OWNER_ENTRY: 4;
+    CONTROL_OWNER_STATE: 4;
+    CONTROL_OWNER_POLL: 4;
+    CONTROL_DESCRIPTOR_PADDING: 24;
+    CONTROL_REQUEST: 4;
+    CONTROL_RELEASE: 4;
+    CONTROL_CANCEL: 4;
+    CONTROL_REQUEST_EPOCH: 16;
+    CONTROL_COMMAND: 4;
+    CONTROL_EXPECTED_GENERATION: 4;
+    CONTROL_LENGTH: 4;
+    CONTROL_CHECKSUM: 4;
+    CONTROL_PRODUCER_PADDING: 20;
+    CONTROL_CLAIMED: 4;
+    CONTROL_READY: 4;
+    CONTROL_RESULT: 4;
+    CONTROL_GENERATION: 4;
+    CONTROL_RESPONSE_LENGTH: 4;
+    CONTROL_RESPONSE_CHECKSUM: 4;
+    CONTROL_CONSUMER_PADDING: 40;
+    CONTROL_PAYLOAD: CONTROL_PAYLOAD_BYTES;
+    CONTROL_RESPONSE: CONTROL_PAYLOAD_BYTES;
+});
+pub const CONTROL_WORDS: usize = CONTROL_SIZE / 4;
 
 // The fields of the header. The loader, the installer, and the ARM code of one
 // build take the offsets from this table, so a field can go anywhere in it.
@@ -544,6 +608,8 @@ packed_fields!(HEADER_FIELDS, HOST_HEADER_SIZE {
     HOST_MANAGE_COPY: 4 * MANAGE_COPY_WORDS;
     /// Word index of the PERSIST buffer within modulecode, not a native address.
     HOST_PERSIST_WORD: 4;
+    /// Word index of the CONTROL mailbox within modulecode, not a native address.
+    HOST_CONTROL_WORD: 4;
     /// The record of the ADJ preview of a recipe whose Fn adjustments the
     /// live view takes from GRKIT_HOST_PREVIEW_FN_BYTES, not from the
     /// record, while GRKIT_HOST_PREVIEW is that record; else 0
@@ -571,6 +637,10 @@ packed_fields!(HEADER_FIELDS, HOST_HEADER_SIZE {
     /// the first start after one installed. The cue sets it back to 0 when it
     /// ends (runtime/viewfinder.h).
     HOST_CUE_LABEL: 4;
+    /// The second fixed record bank, allocated separately from the registry.
+    HOST_RECORD_BANK2: 4;
+    /// One bit per logical record: 0 selects the registry bank, 1 bank 2.
+    HOST_RECORD_BANK_BITS: 8;
 });
 
 /// The values of GRKIT_HOST_UPDATE.
@@ -724,6 +794,8 @@ pub const PLAN_MAGIC_VALUE: u32 = HOST_MAGIC_VALUE;
 /// The modes of `PLAN_MODES`.
 pub const PLAN_SAFE: u32 = 1;
 pub const PLAN_PROFILE: u32 = 2;
+/// The authoritative managed Look catalog supplied the planned choices.
+pub const PLAN_MANAGED: u32 = 4;
 
 fields!(PLAN_FIELDS {
     /// GRKIT_PLAN_MAGIC_VALUE.
@@ -740,7 +812,7 @@ fields!(PLAN_FIELDS {
     PLAN_MODULE_WORDS = 20, 4;
     /// Artwork tiles of the usable modules.
     PLAN_MODULE_TILES = 24, 4;
-    /// GRKIT_PLAN_SAFE and GRKIT_PLAN_PROFILE.
+    /// GRKIT_PLAN_SAFE, GRKIT_PLAN_PROFILE and GRKIT_PLAN_MANAGED.
     PLAN_MODES = 28, 4;
     /// Effect files past the listed ones.
     PLAN_OVERFLOW = 32, 4;
@@ -770,19 +842,30 @@ pub const PICTURE_MASKS: usize = 141376;
 pub const SHOT_ENTRIES: usize = 8;
 /// The shot ring: a write count, the turns of the last shot with a known
 /// posture (`SHOT_LAST_TURNS`), then entry n at `SHOT_ENTRY + SHOT_STRIDE * n`,
-/// which holds the key at `SHOT_KEY`, the record at `SHOT_RECORD`, the
+/// which holds the key at `SHOT_KEY`, a private-look flag at `SHOT_RECORD`, the
 /// posture of the electronic level at `SHOT_POSTURE`, the effective
 /// capture crop at `SHOT_FRAME_CROP`, and the border at `SHOT_BORDER`
-/// (CORE.BORDER, and CORE.BORDER_COLOR in bits 8 to 15). The other words of
-/// an entry are reserved.
+/// (CORE.BORDER, and CORE.BORDER_COLOR in bits 8 to 15). `SHOT_SEQUENCE`
+/// rejects reused-key reads. `SHOT_LOOK` owns compact immutable capture data.
 pub const SHOT_LAST_TURNS: usize = 4;
 pub const SHOT_ENTRY: usize = 8;
-pub const SHOT_STRIDE: usize = 32;
+pub const SHOT_STRIDE: usize = 256;
 pub const SHOT_KEY: usize = 0;
 pub const SHOT_RECORD: usize = 4;
 pub const SHOT_POSTURE: usize = 8;
 pub const SHOT_FRAME_CROP: usize = 12;
 pub const SHOT_BORDER: usize = 16;
+pub const SHOT_SEQUENCE: usize = 20;
+pub const SHOT_LOOK: usize = 32;
+pub const SHOT_LOOK_BYTES: usize = 104;
+pub const SHOT_LOOK_FEATURES: usize = 0;
+pub const SHOT_LOOK_MONO: usize = 4;
+pub const SHOT_LOOK_CODE: usize = 8;
+pub const SHOT_LOOK_NAME: usize = 12;
+pub const SHOT_LOOK_PARAMETERS: usize = 48;
+pub const SHOT_LOOK_SELECTIVE: usize = 60;
+pub const SHOT_LOOK_POST: usize = 76;
+pub const SHOT_LOOK_RGB: usize = 96;
 /// The layout of `GrkitShot` (runtime/sdk/grkit.h) that picture_shot fills:
 /// its size in bytes, then the byte offset of each field, then the bits of
 /// `known`. runtime/picture.c writes these offsets, and
@@ -863,9 +946,13 @@ pub const PROFILE_SIZE: usize = PROFILE_SLOTS + PROFILE_SLOT_COUNT * PROFILE_SLO
 pub const TONE_CURVES: usize = PROFILE + PROFILE_SIZE;
 pub const TONE_SLOTS: usize = 4;
 pub const TONE_SLOT_SIZE: usize = 2 * 512;
-/// Everything after the records: the picture scratch, the menu text, the
-/// live-view labels, the profile table, then the Toning curves.
-pub const TAIL_SIZE: usize = TONE_CURVES + TONE_SLOTS * TONE_SLOT_SIZE;
+/// Reader retirement state, reserved for bounded future reader classes.
+/// The first word is the shared count covering complete record consumers.
+pub const RECORD_PINS: usize = TONE_CURVES + TONE_SLOTS * TONE_SLOT_SIZE;
+pub const RECORD_PINS_SIZE: usize = 40 * 4;
+pub const GLOBAL_RECORD_READERS: usize = RECORD_PINS;
+pub const LOOK_PREPARED_TONE: usize = RECORD_PINS + RECORD_PINS_SIZE;
+pub const TAIL_SIZE: usize = LOOK_PREPARED_TONE + TONE_SLOT_SIZE;
 // The summaries of every record in every menu language end before the
 // value of a group page.
 const _: () = assert!(
@@ -1418,12 +1505,47 @@ pub fn header() -> String {
     }
     table(&mut out, HEADER_FIELDS, false);
     table(&mut out, PERSIST_FIELDS, false);
+    table(&mut out, CONTROL_FIELDS, false);
     for (name, value) in [
         ("PERSIST_CORE_COUNT", PERSIST_CORE_COUNT),
         ("PERSIST_EFFECT_WORDS", PERSIST_EFFECT_WORDS),
+        ("PERSIST_EFFECT_CAPACITY", PERSIST_EFFECT_CAPACITY),
+        ("LOOK_PARAMETER_KEY_BASE", LOOK_PARAMETER_KEY_BASE),
+        ("LOOK_TONING_KEY_BASE", LOOK_TONING_KEY_BASE),
+        ("LOOK_ID_KEY_BASE", LOOK_ID_KEY_BASE),
         ("PERSIST_MODULE_WORDS", PERSIST_MODULE_WORDS),
         ("PERSIST_SIZE", PERSIST_SIZE),
         ("PERSIST_WORDS", PERSIST_WORDS),
+        ("CONTROL_SIZE", CONTROL_SIZE),
+        ("CONTROL_WORDS", CONTROL_WORDS),
+        ("CONTROL_PAYLOAD_BYTES", CONTROL_PAYLOAD_BYTES),
+        ("CONTROL_REQUEST_SIZE", CONTROL_REQUEST_SIZE),
+    ] {
+        writeln!(out, "#define GRKIT_{name} {value}U").unwrap();
+    }
+    for (name, value) in [
+        ("CONTROL_MAGIC_VALUE", CONTROL_MAGIC_VALUE),
+        ("CONTROL_VERSION_VALUE", CONTROL_VERSION_VALUE),
+        ("CONTROL_SEQUENCE_MAX", CONTROL_SEQUENCE_MAX),
+        ("CONTROL_EMPTY", CONTROL_EMPTY),
+        ("CONTROL_ACCEPTED", CONTROL_ACCEPTED),
+        ("CONTROL_BAD_CONTEXT", CONTROL_BAD_CONTEXT),
+        ("CONTROL_BAD_LENGTH", CONTROL_BAD_LENGTH),
+        ("CONTROL_BAD_DIGEST", CONTROL_BAD_DIGEST),
+        ("CONTROL_CHANGED", CONTROL_CHANGED),
+        ("CONTROL_UNSUPPORTED", CONTROL_UNSUPPORTED),
+        ("CONTROL_INVALID", CONTROL_INVALID),
+        ("CONTROL_BUSY", CONTROL_BUSY),
+        ("CONTROL_ATTACH", CONTROL_ATTACH),
+        ("CONTROL_PING", CONTROL_PING),
+        ("CONTROL_SNAPSHOT_BEGIN", CONTROL_SNAPSHOT_BEGIN),
+        ("CONTROL_SNAPSHOT_READ", CONTROL_SNAPSHOT_READ),
+        ("CONTROL_SNAPSHOT_END", CONTROL_SNAPSHOT_END),
+        ("CONTROL_APPLY_BEGIN", CONTROL_APPLY_BEGIN),
+        ("CONTROL_APPLY_WRITE", CONTROL_APPLY_WRITE),
+        ("CONTROL_APPLY_COMMIT", CONTROL_APPLY_COMMIT),
+        ("CONTROL_APPLY_ABORT", CONTROL_APPLY_ABORT),
+        ("CONTROL_CARD_IDENTITY", CONTROL_CARD_IDENTITY),
     ] {
         writeln!(out, "#define GRKIT_{name} {value}U").unwrap();
     }
@@ -1531,6 +1653,7 @@ pub fn header() -> String {
     writeln!(out, "#define GRKIT_PLAN_MAGIC_VALUE {PLAN_MAGIC_VALUE:#x}").unwrap();
     writeln!(out, "#define GRKIT_PLAN_SAFE {PLAN_SAFE}U").unwrap();
     writeln!(out, "#define GRKIT_PLAN_PROFILE {PLAN_PROFILE}U").unwrap();
+    writeln!(out, "#define GRKIT_PLAN_MANAGED {PLAN_MANAGED}U").unwrap();
     table(&mut out, PLAN_FIELDS, false);
     writeln!(
         out,
@@ -1565,7 +1688,7 @@ pub fn header() -> String {
          word is not enough. Word 0 counts the writes, and word 1 \
          (GRKIT_SHOT_LAST_TURNS) holds the turns of the last shot with a known posture. \
          Entry n is at GRKIT_SHOT_ENTRY + GRKIT_SHOT_STRIDE n and holds the key at \
-         GRKIT_SHOT_KEY, the record at GRKIT_SHOT_RECORD, the posture of the \
+         GRKIT_SHOT_KEY, a private-look flag at GRKIT_SHOT_RECORD, the posture of the \
          electronic level at GRKIT_SHOT_POSTURE, the effective capture crop \
          at GRKIT_SHOT_FRAME_CROP, and the border at GRKIT_SHOT_BORDER \
          (runtime/processing.h).",
@@ -1581,6 +1704,17 @@ pub fn header() -> String {
         ("POSTURE", SHOT_POSTURE),
         ("FRAME_CROP", SHOT_FRAME_CROP),
         ("BORDER", SHOT_BORDER),
+        ("SEQUENCE", SHOT_SEQUENCE),
+        ("LOOK", SHOT_LOOK),
+        ("LOOK_BYTES", SHOT_LOOK_BYTES),
+        ("LOOK_FEATURES", SHOT_LOOK_FEATURES),
+        ("LOOK_MONO", SHOT_LOOK_MONO),
+        ("LOOK_CODE", SHOT_LOOK_CODE),
+        ("LOOK_NAME", SHOT_LOOK_NAME),
+        ("LOOK_PARAMETERS", SHOT_LOOK_PARAMETERS),
+        ("LOOK_SELECTIVE", SHOT_LOOK_SELECTIVE),
+        ("LOOK_POST", SHOT_LOOK_POST),
+        ("LOOK_RGB", SHOT_LOOK_RGB),
         ("LAST_TURNS", SHOT_LAST_TURNS),
     ] {
         writeln!(out, "#define GRKIT_SHOT_{name} {value}").unwrap();
@@ -1670,6 +1804,14 @@ pub fn header() -> String {
         "TONE_CURVES",
         TONE_CURVES,
     );
+    writeln!(out, "#define GRKIT_RECORD_PINS {RECORD_PINS}").unwrap();
+    writeln!(out, "#define GRKIT_LOOK_PREPARED_TONE {LOOK_PREPARED_TONE}").unwrap();
+    writeln!(
+        out,
+        "#define GRKIT_GLOBAL_RECORD_READERS {GLOBAL_RECORD_READERS}"
+    )
+    .unwrap();
+    writeln!(out, "#define GRKIT_RECORD_PINS_SIZE {RECORD_PINS_SIZE}").unwrap();
     writeln!(out, "#define GRKIT_TONE_SLOTS {TONE_SLOTS}").unwrap();
     writeln!(out, "#define GRKIT_TONE_SLOT_SIZE {TONE_SLOT_SIZE}").unwrap();
     writeln!(
@@ -1843,6 +1985,8 @@ mod tests {
             .all(|field| field.offset % 4 == 0 && field.size % 4 == 0));
         check(HEADER_FIELDS, HOST_HEADER_SIZE, true);
         check(PERSIST_FIELDS, PERSIST_SIZE, true);
+        check(CONTROL_FIELDS, CONTROL_SIZE, true);
+        assert_eq!(CONTROL_SIZE, 17600);
         assert_eq!(PERSIST_CORE_COUNT, capabilities::state_keys().len());
     }
 

@@ -22,7 +22,7 @@ static u8 native_record_bytes[4096];
 /* The services block of the core (runtime/services.h), where the ADJ
    preview of a recipe keeps its copy of the settings record. */
 #define TEST_SERVICES 0x5c000000U
-static u32 services_memory[0x4000];
+static u32 services_memory[0x9000];
 static volatile u32 *mapped_services(u32 address)
 {
     assert(address >= TEST_SERVICES && address < TEST_SERVICES + sizeof(services_memory) && !(address & 3));

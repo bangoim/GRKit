@@ -15,13 +15,14 @@ use crate::{
     modules, recipes, runtime, Files,
 };
 
-pub const RUNTIME_PATHS: [&str; 6] = [
+pub const RUNTIME_PATHS: [&str; 7] = [
     "SCRIPT/STARTUP.TTL",
     card::LOADER_FILE,
     card::RESIDENT_FILE,
     card::CORE_FILE,
     card::SCAN_FILE,
     card::INSTALL_FILE,
+    "SCRIPT/GRKIT/OWNER.BIN",
 ];
 pub const MAX_ENTRIES: usize = 200;
 pub const MAX_FILE_SIZE: usize = 16 * 1024 * 1024;
@@ -517,6 +518,15 @@ pub struct EffectSet {
 }
 
 impl EffectSet {
+    /// Content identities for a signed official catalog. Package selection does
+    /// not grant permission to relabel arbitrary GRFs as official.
+    pub fn content_hashes(&self) -> Result<BTreeMap<String, String>> {
+        self.files
+            .values()
+            .map(|bytes| Ok((effects::decode(bytes)?.0.id, sha256(bytes))))
+            .collect()
+    }
+
     /// Adds one compiled effect and returns its ID. It refuses an effect that does not
     /// decode, a second effect with the same filename, and more than `runtime::MAX_COUNT`
     /// effects.
@@ -697,6 +707,9 @@ pub fn validate_contents(contents: &Files) -> Result<Contents> {
         .iter()
         .filter(|(name, _)| !mandatory.contains(*name))
     {
+        if crate::release::check_card_evidence(name, blob, contents)? {
+            continue;
+        }
         if data.check(name, blob)? {
             continue;
         }
@@ -1034,6 +1047,14 @@ pub fn assemble_with(
     if let Some((statement, signature)) = extras.release {
         contents.insert(crate::release::STATEMENT_ENTRY.into(), statement.to_vec());
         contents.insert(crate::release::SIGNATURE_ENTRY.into(), signature.to_vec());
+        contents.insert(
+            format!("SD_ROOT/{}", crate::release::CARD_STATEMENT),
+            statement.to_vec(),
+        );
+        contents.insert(
+            format!("SD_ROOT/{}", crate::release::CARD_SIGNATURE),
+            signature.to_vec(),
+        );
     }
     contents.insert("SHA256SUMS".into(), checksum_list(&contents));
     validate_contents(&contents)?;

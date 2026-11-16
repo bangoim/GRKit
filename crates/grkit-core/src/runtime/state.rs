@@ -2,14 +2,15 @@
 //! and the largest file.
 
 use super::{
-    DIAL_SET_WORDS, DIAL_SLOT_WORDS, DIAL_USER_MODES, MANAGE_COPY_WORDS, MAX_COUNT,
-    MODULE_SETTINGS_MAX, MODULE_SETTING_VALUES, RECIPE_NAME_WORDS, RECIPE_SLOTS, RECIPE_WORDS,
+    DIAL_SET_WORDS, DIAL_SLOT_WORDS, DIAL_USER_MODES, MANAGE_COPY_WORDS, MODULE_SETTINGS_MAX,
+    MODULE_SETTING_VALUES, RECIPE_NAME_WORDS, RECIPE_SLOTS, RECIPE_WORDS,
 };
+use crate::abi::PERSIST_EFFECT_CAPACITY;
 use crate::capabilities::{self, StateFile};
 
 /// The largest main state file that INSTALL reads (`STATE_TEXT_MAX` in
 /// runtime/installer.c). It leaves room for keys of a later release.
-pub const STATE_MAX_BYTES: usize = 16384;
+pub const STATE_MAX_BYTES: usize = 32768;
 
 /// A state file keeps the state keys of the capabilities
 /// (`capabilities::state_keys`) and the saved module settings.
@@ -31,11 +32,13 @@ pub fn state_key_id(name: &str) -> u32 {
     id.max(1)
 }
 
-/// The Fn adjustments of an effect are a state entry of their own: the key ID
-/// is this base plus the low 15 bits of the effect's ImageTone code, and the
-/// value is the nine stored bytes (`RECORD_PARAMETERS`) as base-9 digits, the
-/// first adjustment lowest. Neutral adjustments have no entry.
+/// Historical native-code Fn keys. Kept reserved for parsing old files and
+/// module-key exclusion; they are not restored without an ID ownership proof.
 pub const PARAMETER_KEY_BASE: u32 = 990_000_000;
+/// Current Fn/Toning buckets are ID hashes, verified against eight full-ID words.
+pub const LOOK_PARAMETER_KEY_BASE: u32 = crate::abi::LOOK_PARAMETER_KEY_BASE as u32;
+pub const LOOK_TONING_KEY_BASE: u32 = crate::abi::LOOK_TONING_KEY_BASE as u32;
+pub const LOOK_ID_KEY_BASE: u32 = crate::abi::LOOK_ID_KEY_BASE as u32;
 /// The recipes (`runtime/recipes.h`) have the recipe file
 /// (`StateFile::Recipes`). Each word of a recipe has its own range of keys:
 /// word w of recipe n has the key ID this base + w * `RECIPE_KEY_STRIDE` + n.
@@ -172,8 +175,11 @@ pub fn worst_state_size(file: StateFile) -> usize {
         .sum();
     let parameters = match file {
         StateFile::Main => {
-            MAX_COUNT * (line(PARAMETER_KEY_BASE + 32767) + line(PARAMETER_VALUE_MAX))
-                + MAX_COUNT * (line(TONING_KEY_BASE + 32767) + line(8))
+            PERSIST_EFFECT_CAPACITY
+                * (line(LOOK_PARAMETER_KEY_BASE + 32767) + line(PARAMETER_VALUE_MAX))
+                + PERSIST_EFFECT_CAPACITY * (line(LOOK_TONING_KEY_BASE + 32767) + line(8))
+                + 8 * PERSIST_EFFECT_CAPACITY
+                    * (line(LOOK_ID_KEY_BASE + 8 * 32768 - 1) + line(0x0fffffff))
                 + MODULE_SETTINGS_MAX
                     * (line(PARAMETER_KEY_BASE - 1) + line(MODULE_SETTING_VALUES as u32 - 1))
         }
@@ -273,7 +279,10 @@ mod tests {
         let line = STATE_DIGITS + 2;
         assert!(
             worst_state_size(StateFile::Main)
-                <= 2 * line * (MAX_COUNT + capabilities::state_keys().len() + MODULE_SETTINGS_MAX)
+                <= 2 * line
+                    * (10 * PERSIST_EFFECT_CAPACITY
+                        + capabilities::state_keys().len()
+                        + MODULE_SETTINGS_MAX)
         );
         // Module setting IDs stay below the adjustment entries, and values
         // fit the digits that the loader parses.
@@ -297,7 +306,10 @@ mod tests {
             .find_map(|line| line.strip_prefix("#define STATE_PAIRS "))
             .and_then(|value| value.trim_end_matches('U').parse().ok())
             .unwrap();
-        assert!(MAX_COUNT + capabilities::state_keys().len() + MODULE_SETTINGS_MAX <= pairs);
+        assert!(
+            10 * PERSIST_EFFECT_CAPACITY + capabilities::state_keys().len() + MODULE_SETTINGS_MAX
+                <= pairs
+        );
         assert!(RECIPE_STATE_WORDS <= pairs);
         assert!(DIAL_SET_STATE_WORDS <= pairs);
     }

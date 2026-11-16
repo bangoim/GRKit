@@ -7,7 +7,7 @@ use crate::components::{InstructionPatch, Layout, Site};
 
 pub const TARGET: Target = Target {
     name: "gr4-1.21",
-    family: &gr4::FAMILY,
+    family: &gr4::READER_FAMILY,
     firmware: "GR IV 1.21",
     firmware_sha256: "bf4d6c35f6da1c16ed5f2943af570eab8fef326f7501a2b3ce5413fa55ec5c99",
     decoded_sha256: "38352e38a626e14f599cb3df740b115b515a05a3c6bf45de55fb70b06bdd0bdf",
@@ -291,6 +291,11 @@ const SITES: &[Site] = &[
     // The quick view of the playback (0x536c0ca0): the BL that copies the
     // picture of the review after a shot.
     ("canvas_review", 0x536c0d10, "05eb08eb"),
+    ("module_packet_return_0", 0x5393cba4, "28d04be2"),
+    ("module_packet_return_1", 0x5393cf88, "28d04be2"),
+    ("module_packet_return_2", 0x5393d548, "28d04be2"),
+    ("menu_icon_draw_enter", 0x53240640, "0dc0a0e1"),
+    ("menu_icon_draw_leave", 0x53240700, "28d04be2"),
 ];
 
 /// The stock instructions around the processing hooks.

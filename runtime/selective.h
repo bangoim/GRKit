@@ -41,10 +41,9 @@ static u32 selective_weight(const Selective *s,const SelectiveFactors *f,int u,i
     return w;
 }
 /* The weight of each 2 x 2 (Cb, Cr) block at its center, Cr rows of Cb columns. */
-static void selective_table(u32 record,u8 *table,SelectiveFactors *f) {
-    Selective s;
+static void selective_table_from_params(const Selective *input,u8 *table,SelectiveFactors *f) {
+    Selective s=*input;
     u32 i,j,a;
-    selective_load(record,&s);
     for(i=0;i<2;++i) {
         f->angle[i][0]=0;
         for(a=1;a<SELECTIVE_ALONG;++a) f->angle[i][a]=core_divide(256U<<16,(s.t[i][1]-s.t[i][0])*a);
@@ -71,16 +70,17 @@ static void selective_plane(const Plane *p,const u8 *table) {
 }
 
 /* A color record with GRKIT_FEATURE_SELECTIVE. */
-static u32 selective_wanted(const PictureSet *set) {
-    return set->record && !set->mono &&
-        (WORD(set->record,GRKIT_RECORD_FEATURES)&GRKIT_FEATURE_SELECTIVE);
-}
 /* The table and its factors use the scratch, before the plane filters of
    the modules do. */
-static void selective_encode(PictureSet *set) {
+static void selective_encode(PictureSet *set,const ShotLook *look) {
     u8 *table=set->scratch;
     u32 i;
-    selective_table(set->record,table,(SelectiveFactors *)(table+SELECTIVE_TABLE));
+    Selective s;
+    s.hc=(s16)shot_look_u16(look,GRKIT_SHOT_LOOK_SELECTIVE);
+    s.hs=(s16)shot_look_u16(look,GRKIT_SHOT_LOOK_SELECTIVE+2);
+    for(i=0;i<4;++i) s.t[i>>1][i&1]=shot_look_u16(look,GRKIT_SHOT_LOOK_SELECTIVE+4+i*2);
+    s.c0=look->bytes[GRKIT_SHOT_LOOK_SELECTIVE+12]; s.c1=look->bytes[GRKIT_SHOT_LOOK_SELECTIVE+13];
+    selective_table_from_params(&s,table,(SelectiveFactors *)(table+SELECTIVE_TABLE));
     for(i=0;i<set->count;++i) selective_plane(&set->planes[i],table);
 }
 #endif

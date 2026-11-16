@@ -106,7 +106,7 @@ static void recipe_action(volatile u32 *h,u32 controller,u32 e,u32 action) {
     u32 at;
     if(e>=recipe_entries(h)) return;
     if(action==0U) {
-        recipe_apply(h,e);
+        if(recipe_apply(h,e)==RECIPE_BUSY) return;
         recipe_page_state(h)[0]=0;
         settings_value_again(h,1);
     }
@@ -197,7 +197,7 @@ static u32 save_row_select(volatile u32 *h,u32 controller,u32 value) {
     (void)controller; (void)value;
     if(!recipe_listed(h)) return 0;
     e=recipe_save(h);
-    if(e==RECIPE_FULL || !ui_keyboard_prepare(h,recipe_keyboard_text(h,e),UI_KEYBOARD_SHORT,recipe_named,e)) return 0;
+    if(e==RECIPE_FULL || e==RECIPE_SAVE_BUSY || !ui_keyboard_prepare(h,recipe_keyboard_text(h,e),UI_KEYBOARD_SHORT,recipe_named,e)) return 0;
     /* A second recipe adds the Order row: the cursor stays on Save Settings,
        the second setting of the page, when the page shows again. */
     services_word(h,SERVICES_MENU+MENU_ROWS_MOVED)[0]=MENU_MOVED_SETTING+1U;

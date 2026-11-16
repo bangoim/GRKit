@@ -430,9 +430,9 @@ static void plan_array(void)
 {
     module_words = kept_count = 0;
     if (!module_count) return;
-    u32 entries = setting_total + CHOICE_ENTRIES(module_count, listed_count);
+    u32 entries = setting_total + CHOICE_ENTRIES(module_count, EFFECTS_LISTED);
     u32 fixed = SETTINGS_WORDS(entries) + module_contexts + MANAGE_WORDS(module_count) +
-                EFFECT_LIST_WORDS(listed_count) + SERVICES_WORDS + module_data_words;
+                EFFECT_LIST_WORDS(EFFECTS_LISTED) + SERVICES_WORDS + module_data_words;
     u32 room = GRKIT_MODULE_SETTINGS_MAX - entries;
     if (room > (GRKIT_MODULE_ARRAY_WORDS - fixed) / 3) room = (GRKIT_MODULE_ARRAY_WORDS - fixed) / 3;
     plan_kept(room);

@@ -424,10 +424,32 @@ pub fn menu(
             ])
             .chain([layout.define]),
     )?;
+    let grf_object = directory.join("module-menu-grf.o");
+    run(
+        &tools.clang,
+        CAMERA_TARGET
+            .into_iter()
+            .chain([
+                "-mthumb",
+                "-Oz",
+                "-ffreestanding",
+                "-fno-builtin",
+                "-fno-stack-protector",
+                "-fno-unwind-tables",
+                "-fno-asynchronous-unwind-tables",
+                MENU_FRAME_LIMIT,
+                "-Werror=frame-larger-than",
+                "-c",
+                path(&runtime.join("grf.c"))?,
+                "-o",
+                path(&grf_object)?,
+            ])
+            .chain(target_flags(layout)),
+    )?;
     let mut component = linked_component(
         directory,
         "module-menu",
-        &[object, assembly_object],
+        &[object, assembly_object, grf_object],
         body,
         tools,
         (base, end),

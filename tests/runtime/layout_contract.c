@@ -176,7 +176,7 @@ LIKE(Plane, CorePlane, bottom);
 SIZE(CorePictureSet, sizeof(PictureSet));
 LIKE(PictureSet, CorePictureSet, planes);
 LIKE(PictureSet, CorePictureSet, count);
-AT(CorePictureSet, record, __builtin_offsetof(PictureSet, reserved));
+AT(CorePictureSet, white, __builtin_offsetof(PictureSet, reserved));
 LIKE(PictureSet, CorePictureSet, mono);
 LIKE(PictureSet, CorePictureSet, scratch);
 LIKE(PictureSet, CorePictureSet, turns);

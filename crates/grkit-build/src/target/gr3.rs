@@ -15,6 +15,7 @@ use crate::components::{
 
 pub const FAMILY: Family = Family {
     name: "gr3",
+    definition: "FAMILY",
     hooks: HOOKS,
     processing_source: Some(include_str!("../../../../runtime/processing.S")),
     scale_one_column: 4,
@@ -58,6 +59,9 @@ const PROCESSING: &[HookSpec] = &[
     b("module_packet", Processing, Tuning),
     b("module_gamma_flag", Processing, Tuning),
     bl("module_gamma_curves", Processing, Tuning),
+    b("module_packet_return_0", Processing, Tuning),
+    b("module_packet_return_1", Processing, Tuning),
+    b("module_packet_return_2", Processing, Tuning),
 ];
 
 /// GetImageCrop after its first instruction: GR III maps only its native
@@ -82,6 +86,8 @@ const CROP: &[HookSpec] = &[
 const ICONS: &[HookSpec] = &[
     b("menu_icon_width", Menu, MenuPage),
     b("menu_icon_height", Menu, MenuPage),
+    b("menu_icon_draw_enter", Menu, MenuPage),
+    b("menu_icon_draw_leave", Menu, MenuPage),
     b("menu_icon_guard", Menu, MenuPage),
     b("menu_icon_descriptor", Menu, MenuPage),
 ];

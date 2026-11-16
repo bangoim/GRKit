@@ -132,6 +132,21 @@
 #define FW_ADJ_REFRESH FIRMWARE(0x531c0f08)
 #define FW_ADJ_SELECT_SLOT FIRMWARE(0x531c148c)
 #define FW_CHANGE_CONTROLLER FIRMWARE(0x5318408c)
+/* App's actual transition handler 0x531841c0 updates this manager with
+   0x5325eeb8, after the queued ChangeController request is accepted. */
+#define FW_CONTROLLER_MANAGER FIRMWARE(0x53240e20)
+#define FW_CURRENT_CONTROLLER FIRMWARE(0x5325eec0)
+/* Front-end start clears +0x919 before posting the request; event 23480204
+   reaches 0x5326e678 and sets it. The BE release flag remains independent:
+   0x5374a89c sets it, 0x5373f224 clears it after native completion checks. */
+#define FW_SHOOTING_MODEL FIRMWARE(0x532410c0)
+#define FW_CAPTURE_REQUEST_PENDING FIRMWARE(0x5326eebc)
+#define FW_ALL_IMAGE_WRITES_COMPLETE FIRMWARE(0x5326f048)
+#define FW_BE_STILL_PROCESS FIRMWARE(0x5373e0d8)
+#define FW_BE_ACTIVE_RECIPE_COUNT FIRMWARE(0x5374d22c)
+#define FW_BE_RELEASE_BUSY_OFFSET 0x2deU
+#define FW_BE_RECIPE_QUEUE_OFFSET 0x7b8U
+#define LOOK_PUBLISH_CURRENT_CONTROLLER(h) CALL1(FW_CURRENT_CONTROLLER)(CALL0(FW_CONTROLLER_MANAGER)())
 /* The controller factory singleton, which holds one instance of each controller. */
 #define INFO_TITLE_TEXT 0x2d5
 #define INFO_LABEL_TEXTS {0x2d7,0x2d9,0x2db}

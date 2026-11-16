@@ -54,16 +54,25 @@ picture_dng_rect:
 // Z=1 only for an owned record in r0. Preserves all registers.
 picture_owned:
     push {r0-r3, lr}
-    ldr r1, =GRKIT_HEADER_REFERENCE
+    mov lr, #0
+1:  ldr r1, =GRKIT_HEADER_REFERENCE
     ldr r2, [r1, #GRKIT_HOST_COUNT]
-    ldr r1, [r1, #GRKIT_HOST_RECORDS]
+    cmp lr, #0
+    ldreq r1, [r1, #GRKIT_HOST_RECORDS]
+    addne r1, r1, #(GRKIT_HOST_RECORD_BANK2 & ~0xff)
+    ldrne r1, [r1, #(GRKIT_HOST_RECORD_BANK2 & 0xff)]
+    cmp r1, #0
+    beq 4f
     cmp r2, #0
     beq 2f
-1:  cmp r0, r1
+5:  cmp r0, r1
     beq 3f
     add r1, r1, #GRKIT_RECORD_SIZE
     subs r2, r2, #1
-    bne 1b
+    bne 5b
+4:  cmp lr, #0
+    moveq lr, #1
+    beq 1b
 2:  movs r3, #1
 3:  pop {r0-r3, pc}
 
@@ -320,27 +329,26 @@ grain_fill:
    the ImageTone BL in PentaxMakernoteEntryDataSetter. r1 is the IFD entry, and
    r2 the shot settings. FW_IFD_SET_SHORT(entry, 0, value) stores the u16 tag
    value. A shot without a private record keeps the native tag. A playback
-   edit keeps the effect of its photo (picture_capture_tone_record). */
+   edit keeps the effect of its photo (picture_capture_tone_code). */
 .global picture_capture_tone
 picture_capture_tone:
     push {r0-r4, lr}
     mov r0, r2
-    bl picture_capture_tone_record
+    bl picture_capture_tone_code
     mov r12, r0
     pop {r0-r4, lr}
     cmp r12, #0
     ldreq pc, =HOOK_PICTURE_CAPTURE_TONE_TARGET
     mov r0, r1
     mov r1, #0
-    add r12, r12, #(GRKIT_RECORD_CODE & ~0xff)
-    ldrh r2, [r12, #(GRKIT_RECORD_CODE & 0xff)]
+    mov r2, r12
     ldr pc, =FW_IFD_SET_SHORT
 
 /* JPEG header setup of a write and of an in-camera rewrite: the BL to the
    APP1 Exif setup, r0 = writer, r1 = image information. After a successful
    setup, picture_jpeg_xmp (picture.c) adds the XMP segment of the look before
    APP7. The setup result returns. */
-.macro JPEG_HEADER_STUB name, target
+.macro JPEG_HEADER_STUB name, target, callback
 .global \name
 \name:
     push {r0, r1, r4, lr}
@@ -349,16 +357,20 @@ picture_capture_tone:
     movs r4, r0
     beq 1f
     ldr r0, [sp]
-    bl picture_jpeg_xmp
+    bl \callback
 1:  mov r0, r4
     add sp, sp, #8
     pop {r4, pc}
 .endm
 #ifdef HOOK_PICTURE_JPEG_HEADER_TARGET
-JPEG_HEADER_STUB picture_jpeg_header, HOOK_PICTURE_JPEG_HEADER_TARGET
+#if defined(GRKIT_TARGET_GR3_210) || defined(GRKIT_TARGET_GR3_221) || defined(GRKIT_TARGET_GR4_121)
+JPEG_HEADER_STUB picture_jpeg_header, HOOK_PICTURE_JPEG_HEADER_TARGET, picture_jpeg_capture_xmp
+#else
+JPEG_HEADER_STUB picture_jpeg_header, HOOK_PICTURE_JPEG_HEADER_TARGET, picture_jpeg_xmp
+#endif
 #endif
 #ifdef HOOK_PICTURE_JPEG_REWRITE_TARGET
-JPEG_HEADER_STUB picture_jpeg_rewrite, HOOK_PICTURE_JPEG_REWRITE_TARGET
+JPEG_HEADER_STUB picture_jpeg_rewrite, HOOK_PICTURE_JPEG_REWRITE_TARGET, picture_jpeg_xmp
 #endif
 
 /* Capture: the maker-note adjustments (tag 0x247) of a GRKit shot. Replaces

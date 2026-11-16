@@ -108,6 +108,33 @@ fn synthetic_arm_hooks_match_the_target_tables() -> Result<()> {
     Ok(())
 }
 
+/// These native painters have stack-held icon pointers that were
+/// traced through every rotation to a synchronous CPU copy and one epilogue.
+#[test]
+#[ignore = "Requires ARM-capable Clang and LLD; run with --ignored"]
+fn synthetic_icon_draw_guards_cover_verified_painters() -> Result<()> {
+    let tools = tools()?;
+    for (name, enter, leave) in [
+        ("gr3-2.10", 0x5320a7a8, 0x5320a9c4),
+        ("gr3-2.21", 0x5320cb80, 0x5320cd9c),
+        ("gr4-1.21", 0x53240640, 0x53240700),
+    ] {
+        let target = target::TARGETS
+            .iter()
+            .copied()
+            .find(|target| target.name == name)
+            .unwrap();
+        for (symbol, address, bytes) in [
+            ("menu_icon_draw_enter", enter, "0dc0a0e1"),
+            ("menu_icon_draw_leave", leave, "28d04be2"),
+        ] {
+            assert!(target.layout.sites.contains(&(symbol, address, bytes)));
+        }
+        synthetic_hooks(target, &tools)?;
+    }
+    Ok(())
+}
+
 fn synthetic_hooks(target: &'static target::Target, tools: &Toolchain) -> Result<()> {
     let directory = tempfile::tempdir()?;
     let runtime = directory.path().join("runtime");

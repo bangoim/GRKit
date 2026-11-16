@@ -26,6 +26,16 @@
    needs no live view stops it (Controller live-view dispatch 0x5316ea00,
    state 1). Each takes the model and a completion callback. */
 #define FW_SHOOTING_MODEL FIRMWARE(0x5320d574)
+/* ChangeController queues a request; the App handler publishes the actual
+   controller through 0x5322b364. Read its native getter, including when the
+   initial transition completed before GRKit installed its hook. */
+#define FW_CONTROLLER_MANAGER FIRMWARE(0x5320d2d4)
+#define FW_CURRENT_CONTROLLER FIRMWARE(0x5322b36c)
+#define FW_CAPTURE_REQUEST_PENDING FIRMWARE(0x53239a20)
+#define FW_ALL_IMAGE_WRITES_COMPLETE FIRMWARE(0x53239bac)
+#define FW_BE_STILL_PROCESS FIRMWARE(0x535181f4)
+#define FW_BE_ACTIVE_RECIPE_COUNT FIRMWARE(0x535258c4)
+#define LOOK_PUBLISH_CURRENT_CONTROLLER(h) CALL1(FW_CURRENT_CONTROLLER)(CALL0(FW_CONTROLLER_MANAGER)())
 #define FW_LIVE_VIEW_END FIRMWARE(0x5323b28c)
 #define FW_LIVE_VIEW_STOP FIRMWARE(0x5323ae70)
 #define FW_CAPTURE_PROPERTIES FIRMWARE(0x5352879c)

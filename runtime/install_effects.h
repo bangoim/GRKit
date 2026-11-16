@@ -130,87 +130,41 @@ static int discover(void)
    (type 11). A native look (feature 32) gives its own bounds, selectors, all 21
    control fields, and the matrices of every bank and level (grf_native_matrix);
    a capture with highlight correction keeps that set. */
-static const u16 multiaxial_bounds[16] = GRKIT_HUE_BOUNDS;
-static const u8 multiaxial_banks[20] = GRKIT_HUE_SELECTORS;
-static const u16 multiaxial_levels[8] = GRKIT_HUE_LEVEL_CONTROL;
-static const u16 multiaxial_levels_halved[8] = GRKIT_HUE_LEVEL_CONTROL_HALVED;
-static void multiaxial(u32 record, const u8 *profile)
-{
-    const u8 *sectors = profile + GRKIT_GRF_HUE;
-    int levels = (get32(profile + GRKIT_GRF_FEATURES) & GRKIT_FEATURE_HUE_LEVELS) != 0;
-    int native = (get32(profile + GRKIT_GRF_FEATURES) & GRKIT_FEATURE_NATIVE_LOOK) != 0;
-    u32 slot = record + GRKIT_RECORD_MULTIAXIAL, table = slot + 0x98;
-    u32 stock = word(TABLE_ADDRESS(1) + 11 * 4);
-    store(slot, slot + 8);
-    store(slot + 8, slot + 0x20);
-    store(slot + 12, slot + 0x40);
-    store(slot + 16, slot + 0x58);
-    store(slot + 20, word(stock + 12));
-    store(slot + 24, slot + 0x6c);
-    store(slot + 28, word(stock + 20));
-    copy(at(slot + 0x20), native ? profile + GRKIT_NATIVE_BOUNDS : (const u8 *)multiaxial_bounds, sizeof multiaxial_bounds);
-    copy(at(slot + 0x40), native ? profile + GRKIT_NATIVE_SELECTORS : multiaxial_banks, sizeof multiaxial_banks);
-    for (u32 k = 0; k < 5; ++k) store(slot + 0x58 + k * 4, table);
-    volatile u16 *control = (volatile u16 *)at(slot + 0x6c);
-    if (native) {
-        const u8 *fields = profile + GRKIT_NATIVE_CONTROL;
-        for (u32 k = 0; k < 21; ++k) control[k] = (u16)(fields[k * 2] | fields[k * 2 + 1] << 8);
-        for (u32 bank = 0; bank < 12; ++bank)
-            for (u32 level = 0; level < 5; ++level) {
-                int m[9];
-                grf_native_matrix(profile, bank, level, m);
-                for (u32 k = 0; k < 9; ++k) store(table + (bank * 5 + level) * 36 + k * 4, (u32)m[k]);
-            }
-        store(slot + 4, slot + 8);
-        return;
-    }
-    control[0] = 0;
-    for (u32 k = 1; k <= 8; ++k) control[k] = levels ? multiaxial_levels[k - 1] : 0xfff;
-    control[9] = 0;
-    const u8 *fields = sectors + GRKIT_HUE_MATRICES;
-    for (u32 k = 0; k < 11; ++k) control[10 + k] = (u16)(fields[k * 2] | fields[k * 2 + 1] << 8);
-    for (u32 bank = 0; bank < 12; ++bank)
-        for (u32 level = 0; level < 5; ++level) {
-            /* Levels 1 to 3 follow GRKIT_HUE_LEVEL_OFFSET; level 4 repeats level 3. */
-            u32 from = levels ? (level < 4 ? level : 3) : 0;
-            const u8 *c = from ? profile + GRKIT_HUE_LEVEL_OFFSET + (from - 1) * GRKIT_HUE_MATRICES : sectors;
-            int m[9] = {1024, 0, 0, 0, 1024, 0, 0, 0, 1024};
-            for (u32 r = 0; bank && r < 3; ++r) {
-                /* GRF validation keeps each diagonal within the 12-bit register. */
-                int a = (signed char)c[(bank - 1) * 6 + r * 2] * 8;
-                int b = (signed char)c[(bank - 1) * 6 + r * 2 + 1] * 8;
-                m[r * 3 + (r + 1) % 3] = a;
-                m[r * 3 + (r + 2) % 3] = b;
-                m[r * 4] = 1024 - a - b;
-            }
-            for (u32 k = 0; k < 9; ++k) store(table + (bank * 5 + level) * 36 + k * 4, (u32)m[k]);
-        }
-    /* The set for a capture with highlight correction, which the hooks pick by the
-       native flag. The camera then halves the stage's input, so these control fields
-       select the levels and the weight of twice the luminance: the weight breakpoints
-       halve and its slopes double (9-bit, clamped). The address at +4, the set at
-       +0x908, its control fields at +0x920; the other pointers are those of the set. */
-    u32 halved = slot + 0x908;
-    store(slot + 4, halved);
-    for (u32 k = 0; k < 6; ++k) store(halved + k * 4, word(slot + 8 + k * 4));
-    store(halved + 16, slot + 0x920);
-    volatile u16 *half = (volatile u16 *)at(slot + 0x920);
-    half[0] = 0;
-    for (u32 k = 1; k <= 8; ++k) half[k] = levels ? multiaxial_levels_halved[k - 1] : 0xfff;
-    half[9] = 0;
-    for (u32 k = 0; k < 4; ++k) {
-        int slope = (int)(control[14 + k] & 0x1ff) - ((control[14 + k] & 0x100) ? 0x200 : 0);
-        slope *= 2;
-        if (slope > 255) slope = 255;
-        if (slope < -256) slope = -256;
-        half[10 + k] = control[10 + k];
-        half[14 + k] = (u16)(slope & 0x1ff);
-    }
-    for (u32 k = 18; k <= 20; ++k) half[k] = (u16)(control[k] / 2);
+#include "effect_multiaxial.h"
+static void multiaxial(u32 record,const u8 *profile) {
+    u32 stock=word(TABLE_ADDRESS(1)+11*4);
+    effect_record_multiaxial(at(record),record,profile,word(stock+12),word(stock+20));
 }
+
 #endif
 static u32 effect_code(const u8 *id)
 {
     return 0x8000 | (fnv(id, length((const char *)id)) & 0x7fff);
+}
+static int listed_parameter_identity(u32 index,u32 code)
+{
+    u32 value;
+    for(u32 i=0;i<8;++i)
+        if(!state_value(&saved_state,GRKIT_LOOK_ID_KEY_BASE+i*32768U+code,&value) ||
+           value!=look_parameter_id_word(listed[index]+GRKIT_GRF_ID,i)) return 0;
+    return 1;
+}
+static void restore_listed_parameters(u32 base,u32 effect_list)
+{
+    (void)base;
+    for(u32 i=0;i<listed_count && effect_list;++i) {
+        u32 entry=effect_list+EFFECTS_HEADER+i*EFFECTS_STRIDE;
+        u32 code=look_parameter_code(listed[i]+GRKIT_GRF_ID),value;
+        for(u32 j=0;j<listed_count;++j) if(j!=i &&
+            look_parameter_code(listed[j]+GRKIT_GRF_ID)==code) { code=0xffffffffU; break; }
+        store(entry+EFFECTS_PARAMETER_CODE,code);
+        u32 matched=code<=0x7fffU && listed_parameter_identity(i,code);
+        value=0;
+        if(!matched || !state_value(&saved_state,GRKIT_LOOK_PARAMETER_KEY_BASE+code,&value) || value>PARAMETER_VALUE_MAX) value=0;
+        store(entry+EFFECTS_PARAMETER_FN,value);
+        value=0;
+        if(!matched || !state_value(&saved_state,GRKIT_LOOK_TONING_KEY_BASE+code,&value) || value>8) value=0;
+        store(entry+EFFECTS_PARAMETER_TONING,value);
+    }
 }
 #endif

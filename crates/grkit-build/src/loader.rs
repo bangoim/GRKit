@@ -326,6 +326,11 @@ pub fn header(plan: &PatchPlan, body: &FirmwareImage, version: &str) -> Result<S
         crate::components::RTOS_EXECUTABLE_END
     )?;
     writeln!(result, "#define CORE_VIEWFINDER {:#x}U", plan.viewfinder)?;
+    writeln!(
+        result,
+        "#define CORE_LIBRARY_OWNER {:#x}U",
+        plan.library_owner
+    )?;
     writeln!(result, "#define CORE_EXPORT_COUNT {}U", plan.exports.len())?;
     words(
         &mut result,
@@ -577,6 +582,9 @@ fn relocation_tables(
         defines.push(format!(
             "#define {name} (relocated[{symbol}] + {offset:#x}U)"
         ));
+        if matches!(name, "ARRAY_COUNT" | "ARRAY_TABLE" | "HEAP_MIN") {
+            defines.push(format!("#define {name}_SYMBOL {symbol}U"));
+        }
     }
     let mut tables = Vec::new();
     let mut initialized = Vec::new();

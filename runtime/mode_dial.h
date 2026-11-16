@@ -1,5 +1,6 @@
 #ifndef GRKIT_MODE_DIAL_H
 #define GRKIT_MODE_DIAL_H
+#include "look_guard.h"
 /* The mode dial. It belongs to the core: its hooks (point mode.dial) and the
    shooting screen install with the core whenever INSTALL lists a module
    (runtime/installer.c), whatever the modules use and whatever their Enable
@@ -189,6 +190,7 @@ static u32 dial_value(volatile u32 *h,u32 u) {
    stays as it was. The file of the user modes saves. At the first shooting
    screen and when the Mode Dial page opens. */
 static void dial_upgrade(volatile u32 *h) {
+    if(!GRKIT_LOOK_MUTATION_ALLOWED(h)) return;
     volatile u32 *off=h+GRKIT_HOST_DIAL_SHARED_OFF/4;
     u32 i, u, bits=0;
     if(!(*off&DIAL_SHARED_ALL_OFF)) return;
@@ -245,6 +247,25 @@ static void dial_snapshot(volatile u32 *h) {
         ((volatile u8 *)dial_word(h,DIAL_BASE_TONING))[i]=BYTE(record,GRKIT_RECORD_TONING);
     }
 }
+/* A shared-mode baseline names a logical record slot. Hot publication must
+   detach its saved selection before that slot acquires another identity. */
+static void dial_forget_record(volatile u32 *h,u32 index) {
+    if(!dial_word(h,DIAL_ACTIVE)[0]) return;
+    volatile u32 *selected=dial_word(h,DIAL_BASE_CORE+4U*(GRKIT_CORE_TONE-GRKIT_CORE_SETTING_BASE));
+    if(*selected==index+1U) *selected=0;
+}
+/* Same-ID replacement preserves the shared Fn/Toning adjustments. Loading a
+   previously unloaded entry or importing a Look initializes only its slot;
+   other records and shared module/core settings keep their saved values. */
+static void dial_publish_record(volatile u32 *h,u32 index,u32 record,u32 same_identity) {
+    if(!dial_word(h,DIAL_ACTIVE)[0]) return;
+    if(!same_identity) {
+        dial_forget_record(h,index);
+        dial_word(h,DIAL_BASE_FN+4U*index)[0]=recipe_fn_read(record);
+        ((volatile u8 *)dial_word(h,DIAL_BASE_TONING))[index]=BYTE(record,GRKIT_RECORD_TONING);
+    }
+    if(dial_word(h,DIAL_BASE_RECORDS)[0]<=index) dial_word(h,DIAL_BASE_RECORDS)[0]=index+1U;
+}
 /* Set each setting of the copy that a set holds and that differs from the
    current one: the Fn adjustments and Toning first, so the live view builds
    once with them, then the module settings (the Enable of each module
@@ -295,6 +316,7 @@ static u32 dial_set_handle(volatile u32 *h,volatile u32 *t,u32 id) {
    replaces the set that it had. The loader saves the sets after the count
    of changes. */
 static void dial_save(volatile u32 *h,u32 u) {
+    if(!GRKIT_LOOK_MUTATION_ALLOWED(h)) return;
     volatile u32 *s=dial_set(h,u), *t=settings_table(h);
     u32 i, n=0, record=h[GRKIT_HOST_ACTIVE/4], effect=0, fn=0, toning=0;
     for(i=0;i<GRKIT_CORE_SETTING_COUNT;++i) s[GRKIT_DIAL_SET_CORE+i]=dial_core_holds(i) ? dial_core_value(h,i) : 0U;
@@ -324,6 +346,7 @@ static void dial_save(volatile u32 *h,u32 u) {
    is a value that the setting does not offer. A missing effect of the set
    selects Film Look Off. */
 static void dial_set_apply(volatile u32 *h,u32 u) {
+    if(!GRKIT_LOOK_MUTATION_ALLOWED(h)) return;
     volatile u32 *s=dial_set(h,u), *t=settings_table(h);
     u32 n=dial_set_pairs(h,u), i, k, value, record, changed=0, index=GRKIT_TEXT_RECORDS;
     u32 effect=s[GRKIT_DIAL_SET_CORE+CORE_SETTING(GRKIT_CORE_TONE)];
@@ -432,6 +455,7 @@ static u32 dial_save_slot(u32 u) { return DIAL_SLOT_OF(u); }
    user mode that applied it becomes On; GRKit Off stays. The
    slot stays as it is. */
 static void dial_forget(volatile u32 *h,u32 u) {
+    if(!GRKIT_LOOK_MUTATION_ALLOWED(h)) { GRKIT_LOOK_DEFER_DIAL_FORGET(h,u); return; }
     volatile u32 *s=dial_set(h,u), *record=dial_slot_record(h,u);
     u32 w;
     for(w=0;w<GRKIT_DIAL_SET_WORDS;++w) s[w]=0;
@@ -533,6 +557,7 @@ static void dial_enter(volatile u32 *h,u32 u) {
 /* Act on dial position `position`, whose native settings the firmware has
    loaded. */
 static void dial_land(volatile u32 *h,u32 position) {
+    if(!GRKIT_LOOK_MUTATION_ALLOWED(h)) { dial_arm(h,DIAL_RETRY_MS); return; }
     u32 u=dial_user_mode(position), value=GRKIT_DIAL_VALUE_ON;
     dial_word(h,DIAL_AT)[0]=position+1U;
     if(!dial_enabled(h)) {
@@ -612,6 +637,7 @@ A32_ENTRY void menu_dial_saved(u32 object,u32 slot) {
    at once with nothing to set. 0, and nothing changes, while the firmware
    loads the settings of the dial position, or without a slot to write. */
 static u32 dial_snapshot_save(volatile u32 *h,u32 u,const volatile u8 *typed) {
+    if(!GRKIT_LOOK_MUTATION_ALLOWED(h)) return 0;
     volatile u32 *record=dial_slot_record(h,u);
     u32 slot=dial_save_slot(u), name;
     if(!DIAL_NATIVE_SETTLED(DIAL_POSITION()) || !slot) return 0;

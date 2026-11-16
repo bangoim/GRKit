@@ -56,7 +56,9 @@ static unsigned photo_orientation = 1;
 #define SCRATCH (ARENA + 0x500000)
 #define PICTURE_SCRATCH(h) ((void)(h), SCRATCH)
 #define PICTURE_MAP(address) ((u8 *)region((address), GRKIT_PICTURE_SCRATCH))
-#define PICTURE_BARRIER() ((void)0)
+static unsigned barrier_rewrite_entry, barrier_calls, barrier_when;
+static void picture_barrier(void);
+#define PICTURE_BARRIER() picture_barrier()
 /* Maker-note element writes: the entry, then the value of each element. */
 static uint32_t ifd_entry, ifd_writes, ifd_values[32];
 #define PICTURE_IFD_SET_SHORT(entry,index,value) do { assert((index) < 32 && !((value) >> 16)); \
@@ -111,6 +113,16 @@ static uint32_t playback_tone;
 static uint8_t develop_set[17];
 #define DEVELOP_SET(kind) develop_set[(kind)]
 #include "picture.c"
+static void picture_barrier(void)
+{
+    if(barrier_rewrite_entry && ++barrier_calls==barrier_when) {
+        uint32_t entry=barrier_rewrite_entry;
+        ++WORD(entry,GRKIT_SHOT_SEQUENCE);
+        BYTE(entry,GRKIT_SHOT_LOOK+GRKIT_SHOT_LOOK_NAME)='B';
+        barrier_rewrite_entry=0;
+    }
+}
+
 
 static volatile u32 header[GRKIT_HOST_HEADER_SIZE / 4];
 volatile u32 *framing_header(void) { return header; }
@@ -270,14 +282,37 @@ static void picture(uint32_t index, uint32_t width, uint32_t height, uint32_t pi
 }
 /* The shot settings pointer of the encoded pictures. */
 #define SHOT (ARENA + 0x9000)
+static void snapshot_look(uint32_t r,ShotLook *look)
+{
+    memset(look,0,sizeof(*look));
+    if(!owned(header,r)) return;
+    static const u32 fields[][3]={
+        {GRKIT_RECORD_FEATURES,GRKIT_SHOT_LOOK_FEATURES,4},
+        {GRKIT_RECORD_MONOCHROME,GRKIT_SHOT_LOOK_MONO,4},
+        {GRKIT_RECORD_CODE,GRKIT_SHOT_LOOK_CODE,2},
+        {GRKIT_RECORD_NAME,GRKIT_SHOT_LOOK_NAME,36},
+        {GRKIT_RECORD_SELECTIVE,GRKIT_SHOT_LOOK_SELECTIVE,16},
+        {GRKIT_RECORD_POST,GRKIT_SHOT_LOOK_POST,18},
+    };
+    for(u32 i=0;i<sizeof(fields)/sizeof(fields[0]);++i)
+        for(u32 k=0;k<fields[i][2];++k) look->bytes[fields[i][1]+k]=BYTE(r,fields[i][0]+k);
+    for(u32 i=0;i<9;++i) look->bytes[GRKIT_SHOT_LOOK_PARAMETERS+i]=(u8)develop_parameter(header,r,i,developing);
+    for(u32 i=0;i<3;++i) for(u32 k=0;k<2;++k)
+        look->bytes[GRKIT_SHOT_LOOK_RGB+i*2+k]=BYTE(r,GRKIT_RECORD_CURVES+i*GRKIT_RECORD_CURVE_SIZE+510+k);
+}
+static u32 snapshot_white(uint32_t r) { ShotLook look; snapshot_look(r,&look); return shot_look_white(&look); }
 /* Record r and the posture of the electronic level for a shot in the shot
    ring, as the still build stores them. */
 static void store_posed(uint32_t shot, uint32_t r, uint32_t posture)
 {
     uint32_t ring = SCRATCH + GRKIT_SHOT_RING, n = WORD(ring, 0);
     uint32_t entry = ring + GRKIT_SHOT_ENTRY + (n & (GRKIT_SHOT_ENTRIES - 1)) * GRKIT_SHOT_STRIDE;
+    ShotLook look;
+    snapshot_look(r,&look);
+    WORD(entry, GRKIT_SHOT_SEQUENCE) = n+1;
+    for(u32 i=0;i<sizeof(look);++i) BYTE(entry,GRKIT_SHOT_LOOK+i)=look.bytes[i];
     WORD(entry, GRKIT_SHOT_KEY) = shot;
-    WORD(entry, GRKIT_SHOT_RECORD) = r;
+    WORD(entry, GRKIT_SHOT_RECORD) = owned(header,r);
     WORD(entry, GRKIT_SHOT_POSTURE) = posture;
     WORD(entry, GRKIT_SHOT_FRAME_CROP) = header[GRKIT_HOST_FRAME_CROP / 4];
     WORD(ring, 0) = n + 1;
@@ -797,28 +832,88 @@ static void capture_tone_contract(void)
     HALF(record(2), GRKIT_RECORD_CODE) = 0x9235;
     /* A capture with an effect, and a native capture. */
     store_shot(SHOT, record(1));
-    assert(picture_capture_tone_record(SHOT) == record(1));
+    assert(picture_capture_tone_code(SHOT) == HALF(record(1),GRKIT_RECORD_CODE));
     store_shot(SHOT + 0x100, 0);
     playback_tone = 0x10000 | (0x9235 - 0x100);
-    assert(picture_capture_tone_record(SHOT + 0x100) == 0);
+    assert(picture_capture_tone_code(SHOT + 0x100) == 0);
     /* A write without a build while shooting: native. */
     ((volatile u8 *)header)[GRKIT_HOST_FRAME_FILE] = 0;
-    assert(picture_capture_tone_record(SHOT + 0x200) == 0);
+    assert(picture_capture_tone_code(SHOT + 0x200) == 0);
     /* In playback: the effect of the photo shown, if the camera has it. */
     ((volatile u8 *)header)[GRKIT_HOST_FRAME_FILE] = 1;
-    assert(picture_capture_tone_record(SHOT + 0x200) == record(2));
-    assert(picture_capture_record(SHOT + 0x200) == 0);
+    assert(picture_capture_tone_code(SHOT + 0x200) == HALF(record(2),GRKIT_RECORD_CODE));
+    ShotLook missing;
+    assert(!shot_look_read(header,SHOT+0x200,&missing));
     playback_tone = 0x10000 | (0x9236 - 0x100);
-    assert(picture_capture_tone_record(SHOT + 0x200) == 0);
+    assert(picture_capture_tone_code(SHOT + 0x200) == 0);
     playback_tone = 6;
-    assert(picture_capture_tone_record(SHOT + 0x200) == 0);
+    assert(picture_capture_tone_code(SHOT + 0x200) == 0);
     /* A build in playback, such as a RAW development, keeps its own record. */
     playback_tone = 0x10000 | (0x9235 - 0x100);
     store_shot(SHOT + 0x300, 0);
-    assert(picture_capture_tone_record(SHOT + 0x300) == 0);
+    assert(picture_capture_tone_code(SHOT + 0x300) == 0);
     ((volatile u8 *)header)[GRKIT_HOST_FRAME_FILE] = 0;
     playback_tone = 0;
 }
+static void immutable_shot_look_contract(void)
+{
+    encode_setup();
+    fill_planes(90,62,44);
+    keep_red(record(0));
+    HALF(record(0),GRKIT_RECORD_CODE)=0x9345;
+    HALF(record(0),GRKIT_RECORD_NAME)='A';
+    BYTE(record(0),GRKIT_RECORD_PARAMETERS)=2;
+    HALF(record(0),GRKIT_RECORD_CURVES+510)=14777;
+    HALF(record(0),GRKIT_RECORD_CURVES+GRKIT_RECORD_CURVE_SIZE+510)=14584;
+    HALF(record(0),GRKIT_RECORD_CURVES+2*GRKIT_RECORD_CURVE_SIZE+510)=14391;
+    still(record(0));
+    ShotLook before,after;
+    assert(shot_look_read(header,SHOT,&before)==2);
+    u32 white=shot_look_white(&before);
+    memset(region(record(0),GRKIT_RECORD_SIZE),0,GRKIT_RECORD_SIZE);
+    assert(shot_look_read(header,SHOT,&after)==2 && !memcmp(&before,&after,sizeof(before)));
+    assert(picture_capture_tone_code(SHOT)==0x9345);
+    picture_record_parameters(0x1234,SHOT);
+    assert(ifd_values[0]==2 && shot_look_white(&after)==white);
+    assert(shot_look_u16(&after,GRKIT_SHOT_LOOK_NAME)=='A');
+    picture_encode(0,MESSAGE);
+    assert(flushes==12 && BYTE(planes[0].c,0)==128 && BYTE(planes[0].c,1)==128);
+    /* Reusing the same key during a copy cannot publish mixed generations. */
+    barrier_rewrite_entry=SCRATCH+GRKIT_SHOT_RING+GRKIT_SHOT_ENTRY;
+    barrier_calls=0; barrier_when=2;
+    assert(!shot_look_read(header,SHOT,&after));
+    assert(!barrier_rewrite_entry);
+    assert(shot_look_read(header,SHOT,&after)==2 && shot_look_u16(&after,GRKIT_SHOT_LOOK_NAME)=='B');
+    barrier_rewrite_entry=SCRATCH+GRKIT_SHOT_RING+GRKIT_SHOT_ENTRY;
+    barrier_calls=0; barrier_when=2;
+    u32 posture=99;
+    assert(!shot_word(header,SHOT,GRKIT_SHOT_POSTURE,&posture) && posture==99);
+}
+
+static void capture_xmp_uses_immutable_shot_name(void)
+{
+    encode_setup();
+    HALF(record(0),GRKIT_RECORD_CODE)=0x9345;
+    const u16 name[]={'C','a','p','t','u','r','e','d',0};
+    effect_name(record(0),name,9);
+    still(record(0));
+    memset(region(record(0),GRKIT_RECORD_SIZE),0,GRKIT_RECORD_SIZE);
+    jpeg_header(0x9345,0x20000);
+    u32 group=SHOT+0x800,segment;
+    WORD(JPEG_WRITER,8)=group;
+    BYTE(group,0)=0; WORD(group,8)=SHOT;
+    picture_jpeg_capture_xmp(JPEG_WRITER);
+    const char *text=jpeg_packet(&segment);
+    assert(text && strstr(text,"Captured"));
+    jpeg_header(0x9345,0x20000);
+    WORD(group,8)=SHOT+0x400;
+    picture_jpeg_capture_xmp(JPEG_WRITER);
+    assert(!jpeg_packet(&segment));
+    WORD(group,8)=SHOT; BYTE(group,0)=4;
+    picture_jpeg_capture_xmp(JPEG_WRITER);
+    assert(!jpeg_packet(&segment));
+}
+
 static void jpeg_xmp_contract(void)
 {
     static const uint16_t trix[] = {'T', 'r', 'i', '-', 'X', ' ', '<', '4', '0', '0', '>', ' ', '&', ' ', '"', 0xdc, '"', 0};
@@ -832,6 +927,14 @@ static void jpeg_xmp_contract(void)
     /* The name of the effect with the code, as escaped UTF-8. */
     assert(!strcmp(jpeg_keyword(0x9234), "Tri-X &lt;400&gt; &amp; &quot;\xc3\x9c&quot;"));
     assert(!strcmp(jpeg_keyword(0x9235), "Portra 400"));
+    /* Deleted records stay allocated for old readers, but cannot be selected
+       for a new development or used to fabricate a rewrite name. */
+    header[GRKIT_HOST_SERVICES/4]=ARENA+0x400000;
+    WORD(header[GRKIT_HOST_SERVICES/4]+SERVICES_LOOK_PUBLISH,
+         __builtin_offsetof(struct look_publish,retired))=1U<<2;
+    assert(!record_of_code(header,0x9235) && !jpeg_keyword(0x9235));
+    assert(record_of_code(header,0x9234)==record(1));
+    header[GRKIT_HOST_SERVICES/4]=0;
     /* A native look gets its menu name; a code without a name gets no segment. */
     assert(!strcmp(jpeg_keyword(0x100), "Standard"));
     assert(!strcmp(jpeg_keyword(0x105), "Hi-Contrast B&amp;W"));
@@ -897,7 +1000,9 @@ static void jpeg_xmp_contract(void)
 int main(void)
 {
     capture_tone_contract();
+    immutable_shot_look_contract();
     jpeg_xmp_contract();
+    capture_xmp_uses_immutable_shot_name();
 #ifdef GRAIN_FILL_PITCH
     grain_contract();
 #endif
@@ -916,18 +1021,20 @@ int main(void)
         grkit_export_picture_white(&s, w);
         assert(w[0] == 255 && w[1] == 255 && w[2] == 255);
         reset();
-        s.record = record(1);
         HALF(record(1), GRKIT_RECORD_CURVES + 255 * 2) = 14777;
         HALF(record(1), GRKIT_RECORD_CURVES + GRKIT_RECORD_CURVE_SIZE + 255 * 2) = 14584;
         HALF(record(1), GRKIT_RECORD_CURVES + 2 * GRKIT_RECORD_CURVE_SIZE + 255 * 2) = 14391;
+        s.white=snapshot_white(record(1));
         grkit_export_picture_white(&s, w);
         assert(w[0] == 230 && w[1] == 227 && w[2] == 224);
         post(record(1), swap);
+        s.white=snapshot_white(record(1));
         grkit_export_picture_white(&s, w);
         assert(w[0] == 227 && w[1] == 230 && w[2] == 224);
         HALF(record(1), GRKIT_RECORD_CURVES + 255 * 2) = 16383;
         HALF(record(1), GRKIT_RECORD_CURVES + GRKIT_RECORD_CURVE_SIZE + 255 * 2) = 16383;
         HALF(record(1), GRKIT_RECORD_CURVES + 2 * GRKIT_RECORD_CURVE_SIZE + 255 * 2) = 16383;
+        s.white=snapshot_white(record(1));
         grkit_export_picture_white(&s, w);
         assert(w[0] == 255 && w[1] == 255 && w[2] == 255);
     }
@@ -1349,8 +1456,8 @@ int main(void)
     encode_setup();
     fill_planes(40, 128, 128);
     STAMP_STYLE = 1;
-    still(record(2));
     WORD(record(2), GRKIT_RECORD_MONOCHROME) = 1;
+    still(record(2));
     picture_encode(0, MESSAGE);
     for (u32 i = 0; i < 3; ++i) { struct box b = changes(i, 1); assert(b.lit && b.lighter && !b.orange); }
     /* Its light is white: brighter in luma than the amber light of a color picture. */
@@ -1540,8 +1647,8 @@ int main(void)
         for (u32 k = 0; k < sizeof cases / sizeof *cases; ++k) {
             encode_setup();
             fill_planes(90, cases[k][0], cases[k][1]);
-            still(record(0));
             keep_red(record(0));
+            still(record(0));
             picture_encode(0, MESSAGE);
             assert(flushes == 12);
             for (u32 i = 0; i < 3; ++i) {
@@ -1558,8 +1665,8 @@ int main(void)
     encode_setup();
     fill_planes(90, 62, 44);
     BYTE(DESCRIPTORS + 0x100, 0x10) = 2;
-    still(record(0));
     keep_red(record(0));
+    still(record(0));
     picture_encode(0, MESSAGE);
     for (u32 y = 0; y < 400; ++y) for (u32 x = 0; x < 600; ++x)
         assert(BYTE(planes[0].c, y * 640 + x) == (y < 200 ? 128 : (x & 1 ? 44 : 62)));
@@ -1567,8 +1674,8 @@ int main(void)
     encode_setup();
     fill_planes(40, 128, 128);
     STAMP_STYLE = 1;
-    still(record(0));
     keep_red(record(0));
+    still(record(0));
     picture_encode(0, MESSAGE);
     assert(flushes == 12 && changes(0, 0).orange);
     /* A monochrome record or a pointer that no record owns changes nothing. */
@@ -1631,10 +1738,12 @@ int main(void)
            with a change of +2 records 0, sharpness -3 with +1 records -2. */
         BYTE(record(2), GRKIT_RECORD_FN_DEFAULTS + 0) = 7;
         BYTE(record(2), GRKIT_RECORD_FN_DEFAULTS + 6) = 6;
+        still(record(2));
         picture_record_parameters(0x1234, SHOT);
         assert(ifd_values[0] == 0 && ifd_values[6] == 0xfffe && ifd_values[3] == 4);
         BYTE(record(2), GRKIT_RECORD_FN_DEFAULTS + 0) = 0;
         BYTE(record(2), GRKIT_RECORD_FN_DEFAULTS + 6) = 0;
+        still(record(2));
         picture_record_parameters(0x1234, SHOT);
         /* The other elements keep the native fill. */
         for (u32 i = 0; i < 32; ++i)

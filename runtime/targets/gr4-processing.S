@@ -18,6 +18,9 @@
 // 0x53912c70): sb = context (+0x8000), r4 = packet, r5 = transient object,
 // r7 = settings. The native Standard branch (1.11 0x53911614) writes one byte
 // at +0x1f8, so the fill keeps the byte after it.
+#ifdef HOOK_MODULE_PACKET_RETURN_0
+#define GRKIT_PACKET_REFERENCES 1
+#endif
 #define PROCESSING_CONTEXT sb
 #define PROCESSING_OBJECT r5
 #define PROCESSING_KEPT_BYTE 0x1f9
@@ -138,3 +141,22 @@ curves_stock:
     pop {r0, r5, r12, lr}
     ldr pc, =HOOK_MODULE_GAMMA_CURVES_TARGET
 .ltorg
+
+#ifdef GRKIT_PACKET_REFERENCES
+// 1.21: all three synchronous outer pipelines keep their packet at fp-356.
+// Their normal and early exits converge here after the final stage reader.
+module_packet_return_0:
+module_packet_return_1:
+module_packet_return_2:
+    push {r0-r3, r12, lr}
+    sub r0, fp, #356
+    ldr r0, [r0, #8]
+    bl .Lowned_record
+    bne 991f
+    mvn r1, #0
+    bl .Lpacket_reference
+991:
+    pop {r0-r3, r12, lr}
+    sub sp, fp, #40
+    ldm sp, {r4-r11, sp, pc}
+#endif

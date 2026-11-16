@@ -30,14 +30,16 @@
     cmp r0, r3
     beq owned_done
 owned_scan:
+    mov lr, #0
+owned_bank:
+    ldr r1, =GRKIT_HEADER_REFERENCE
     ldr r2, [r1, #GRKIT_HOST_COUNT]
-    ldr r1, [r1, #GRKIT_HOST_RECORDS]
-    cmp r0, r1
-    blo owned_no
-    add r3, r2, r2, lsl #4
-    add r3, r1, r3, lsl #8
-    cmp r0, r3
-    bhs owned_no
+    cmp lr, #0
+    ldreq r1, [r1, #GRKIT_HOST_RECORDS]
+    addne r1, r1, #(GRKIT_HOST_RECORD_BANK2 & ~0xff)
+    ldrne r1, [r1, #(GRKIT_HOST_RECORD_BANK2 & 0xff)]
+    cmp r1, #0
+    beq owned_next_bank
     cmp r2, #0
     beq owned_no
 owned_loop:
@@ -46,16 +48,46 @@ owned_loop:
     add r1, r1, #GRKIT_RECORD_SIZE
     subs r2, r2, #1
     bne owned_loop
+owned_next_bank:
+    cmp lr, #0
+    moveq lr, #1
+    beq owned_bank
 owned_no:
     movs r3, #1
 owned_done:
     pop {r0-r3, pc}
 
+#ifdef GRKIT_PACKET_REFERENCES
+// r1 is +1 or -1. Enter before loading a record pointer. Saturation sticks at
+// UINT_MAX, disabling retirement rather than allowing a live record to free.
+.Lpacket_reference:
+    push {r0-r3, r12, lr}
+    ldr r2, =GRKIT_HEADER_REFERENCE
+    ldr r2, [r2, #GRKIT_HOST_TAIL]
+    ldr r12, =GRKIT_GLOBAL_RECORD_READERS
+    add r2, r2, r12
+    dmb ish
+.Lpacket_reference_retry:
+    ldrex r3, [r2]
+    cmn r3, #1
+    beq .Lpacket_reference_stuck
+    add r3, r3, r1
+    strex r12, r3, [r2]
+    cmp r12, #0
+    bne .Lpacket_reference_retry
+    dmb ish
+    b .Lpacket_reference_done
+.Lpacket_reference_stuck:
+    clrex
+.Lpacket_reference_done:
+    pop {r0-r3, r12, pc}
+#endif
+
 // The custom-curve path of the native gamma stage composes the record curves
 // with the base curve (the first 512 bytes of the gamma object) on every
 // live-view frame, then flags the result (GAMMA_UPLOAD) for the table build.
 // For a private record the result depends only on the gamma object, the
-// record (only the installer writes its curves), the bypass byte of the packet
+// immutable bank of the record, the bypass byte of the packet
 // (+0x89), and the base curve. GRKIT_HOST_GAMMA_KEY keeps a hash of these
 // inputs for the last composition of a private record.
 // r0 = gamma object, r1 = record, r2 = packet. Return Z=1 when the object
@@ -103,16 +135,16 @@ gamma_hash:
     pop {r0, r1}
     bx lr
 
-// Store r0, the record of a non-live-view build (0 for native processing),
+// Snapshot r0, the record of a non-live-view build (0 for native processing),
 // the posture of the electronic level, and the effective capture crop in
 // the shot ring under the shot settings pointer r7. The live view (context
 // kind 1) stores nothing. A reader
-// in another task checks the key again after it reads the record, so the key
-// is cleared while the entry changes. FW_LEVEL is a static object whose second
+// in another task copies values and checks both key and generation again;
+// the generation changes before the key is cleared and fields are written. FW_LEVEL is a static object whose second
 // word points to the electronic level, or holds 0 before the level exists.
 // Preserves all registers.
-.if GRKIT_SHOT_STRIDE != 1 << 5
-.error "The shot ring index shift assumes 32-byte entries"
+.if GRKIT_SHOT_STRIDE != 1 << 8
+.error "The shot ring index shift assumes 256-byte entries"
 .endif
 .Lshot_store:
     push {r0-r3, r12, lr}
@@ -128,11 +160,56 @@ gamma_hash:
     add r12, r2, #1
     str r12, [r3]
     and r2, r2, #(GRKIT_SHOT_ENTRIES - 1)
-    add r2, r3, r2, lsl #5
+    add r2, r3, r2, lsl #8
+    str r12, [r2, #(GRKIT_SHOT_ENTRY + GRKIT_SHOT_SEQUENCE)]
+    dmb ish
     mov r12, #0
     str r12, [r2, #(GRKIT_SHOT_ENTRY + GRKIT_SHOT_KEY)]
     dmb ish
-    str r0, [r2, #(GRKIT_SHOT_ENTRY + GRKIT_SHOT_RECORD)]
+    cmp r0, #0
+    movne r12, #1
+    moveq r12, #0
+    str r12, [r2, #(GRKIT_SHOT_ENTRY + GRKIT_SHOT_RECORD)]
+    // Private shot data outlives this packet but never borrows its record.
+    cmp r0, #0
+    beq .Lshot_native
+    .macro shot_copy source, destination, size
+    add r3, r0, #(\source & ~0xff)
+    add r3, r3, #(\source & 0xff)
+    add r1, r2, #(GRKIT_SHOT_ENTRY + GRKIT_SHOT_LOOK + \destination)
+    mov r12, #\size
+991: ldrb lr, [r3], #1
+    strb lr, [r1], #1
+    subs r12, r12, #1
+    bne 991b
+    .endm
+    shot_copy GRKIT_RECORD_FEATURES, GRKIT_SHOT_LOOK_FEATURES, 4
+    shot_copy GRKIT_RECORD_MONOCHROME, GRKIT_SHOT_LOOK_MONO, 4
+    shot_copy GRKIT_RECORD_CODE, GRKIT_SHOT_LOOK_CODE, 2
+    shot_copy GRKIT_RECORD_NAME, GRKIT_SHOT_LOOK_NAME, 36
+    shot_copy GRKIT_RECORD_SELECTIVE, GRKIT_SHOT_LOOK_SELECTIVE, 16
+    shot_copy GRKIT_RECORD_POST, GRKIT_SHOT_LOOK_POST, 18
+    shot_copy (GRKIT_RECORD_CURVES+510), GRKIT_SHOT_LOOK_RGB, 2
+    shot_copy (GRKIT_RECORD_CURVES+GRKIT_RECORD_CURVE_SIZE+510), (GRKIT_SHOT_LOOK_RGB+2), 2
+    shot_copy (GRKIT_RECORD_CURVES+2*GRKIT_RECORD_CURVE_SIZE+510), (GRKIT_SHOT_LOOK_RGB+4), 2
+    // Preserve actual Fn values, including a RAW development's override.
+    adr r1, shot_parameter_slots
+    add r3, PROCESSING_OBJECT, #0x1e0
+    mov r0, #0
+    add r12, r2, #(GRKIT_SHOT_ENTRY + GRKIT_SHOT_LOOK + GRKIT_SHOT_LOOK_PARAMETERS)
+992: ldrb lr, [r1], #1
+    ldrh lr, [r3, lr]
+    strb lr, [r12], #1
+    add r0, r0, #1
+    cmp r0, #9
+    bne 992b
+    .purgem shot_copy
+    b .Lshot_snapshot_done
+.Lshot_native:
+    mov r12, #0
+    str r12, [r2, #(GRKIT_SHOT_ENTRY + GRKIT_SHOT_LOOK + GRKIT_SHOT_LOOK_CODE)]
+.Lshot_snapshot_done:
+    ldr r1, =GRKIT_HEADER_REFERENCE
     // Only still captures own the selected crop. RAW development and other
     // non-live-view tasks keep their recorded geometry instead.
     ldrb r12, [PROCESSING_CONTEXT, #0x2ac]
@@ -162,6 +239,9 @@ gamma_hash:
     str r7, [r2, #(GRKIT_SHOT_ENTRY + GRKIT_SHOT_KEY)]
 shot_done:
     pop {r0-r3, r12, pc}
+shot_parameter_slots:
+    .byte 0,2,4,6,8,10,14,20,22
+    .balign 4
 
 // Replaces the BL to the native parameter normalizer, not its shared entry.
 // Snapshot activation before constructing this task's packet. Unsupported
@@ -169,6 +249,10 @@ shot_done:
 // private record.
 module_parameters:
     push {r0-r3, r12, lr}
+#ifdef GRKIT_PACKET_REFERENCES
+    mov r1, #1
+    .word 0xeb000000 | (((.Lpacket_reference - . - 8) >> 2) & 0x00ffffff)
+#endif
     ldr r0, =GRKIT_HEADER_REFERENCE
     ldr r3, [r0, #GRKIT_HOST_PROCESSING_CALLS]
     add r3, r3, #1
@@ -214,8 +298,6 @@ parameters_committed:
     .word 0xeb000000 | (((.Lowned_record - . - 8) >> 2) & 0x00ffffff)
     bne parameters_stock
     str r0, [r4, #8]
-    // Capture metadata and the encode read the record of this shot.
-    .word 0xeb000000 | (((.Lshot_store - . - 8) >> 2) & 0x00ffffff)
     // Fill the transient object like the native Standard branch, from the
     // adjustments of the record (r0), not from the native settings.
     add r3, r0, #(GRKIT_RECORD_PARAMETERS & ~0xff)
@@ -311,6 +393,11 @@ develop_copy:
 develop_done:
     pop {r1, r3}
 #endif
+    // Snapshot after Fn/development normalization, before stage-only overrides.
+    push {r0}
+    ldr r0, [r4, #8]
+    .word 0xeb000000 | (((.Lshot_store - . - 8) >> 2) & 0x00ffffff)
+    pop {r0}
 #ifdef NATIVE_SATURATION_BEFORE_CURVES
     // A native look applies saturation after the tone curves, as GR IV does:
     // picture_post applies it, and the native processing gets the neutral
@@ -351,6 +438,10 @@ develop_slots:
     .balign 4
 #endif
 parameters_stock:
+#ifdef GRKIT_PACKET_REFERENCES
+    mvn r1, #0
+    .word 0xeb000000 | (((.Lpacket_reference - . - 8) >> 2) & 0x00ffffff)
+#endif
     mov r0, #0
     str r0, [r4, #8]
     // Other non-live-view builds, such as in-camera RAW development, record no effect.

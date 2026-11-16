@@ -1,5 +1,6 @@
 #ifndef GRKIT_SETTING_STORE_H
 #define GRKIT_SETTING_STORE_H
+#include "look_guard.h"
 /* Set the settings of runtime/settings.h. The menu component sets them, and
    the other components only read them. The includer defines the three
    functions that follow. */
@@ -16,6 +17,8 @@ static void tone_stored(volatile u32 *h);
 
 /* Commit a value of CORE.TONE and end its live-view preview. */
 static __attribute__((unused)) void tone_store(volatile u32 *h,u32 value) {
+    if(!GRKIT_LOOK_MUTATION_ALLOWED(h)) return;
+    if(value && !GRKIT_LOOK_RECORD_ALLOWED(h,value-1)) return;
     h[GRKIT_HOST_ACTIVE/4]=tone_record(h,value);
     h[GRKIT_HOST_PREVIEW/4]=0;
     GRKIT_STATE_CHANGED(h);
@@ -43,7 +46,9 @@ static __attribute__((unused)) void aspect_store(volatile u32 *h,u32 value) {
 /* Set a setting. A value that the setting does not offer does nothing. A
    change of a module setting counts in the table. */
 static __attribute__((unused)) void setting_store(volatile u32 *h,u32 handle,u32 value) {
+    if(!GRKIT_LOOK_MUTATION_ALLOWED(h)) return;
     volatile u32 *t;
+    if(handle==GRKIT_CORE_TONE && value && !GRKIT_LOOK_RECORD_ALLOWED(h,value-1)) return;
     if(IS_CORE_SETTING(handle)) {
         /* A saved ratio can be hidden by the native aspect. Compare the
            stored selection so clearing that hidden ratio is persisted. */

@@ -1,5 +1,6 @@
 #ifndef GRKIT_EFFECTS_H
 #define GRKIT_EFFECTS_H
+#include "look_parameters.h"
 /* The effects of GRKIT/EFFECTS: the list of each effect file, also one that
    did not install. The options rows of a page of CORE.TONE in the GRKit
    section of MENU turn each effect on or off (runtime/menu_listed.h). A change of
@@ -22,7 +23,7 @@
 /* The most effect files that GRKit lists, those with the smallest IDs. */
 #define EFFECTS_LISTED 64U
 #define EFFECTS_COUNT 0U
-/* The handle of the choice of effect 0. Effect i has handle base + i. */
+/* Base of the stable choice slots. Logical rows may move after deletion. */
 #define EFFECTS_SETTINGS 4U
 #define EFFECTS_HEADER 8U
 /* Each effect: its status at this start, its record index or EFFECTS_NO_RECORD,
@@ -31,7 +32,12 @@
 #define EFFECTS_RECORD 4U
 #define EFFECTS_NAME 8U
 #define EFFECTS_NAME_UNITS 18U
-#define EFFECTS_STRIDE (EFFECTS_NAME + 2U * EFFECTS_NAME_UNITS)
+#define EFFECTS_SLOT (EFFECTS_NAME + 2U * EFFECTS_NAME_UNITS)
+/* Shared adjustments survive unloading; these fields move with the ID row. */
+#define EFFECTS_PARAMETER_CODE (EFFECTS_SLOT + 4U)
+#define EFFECTS_PARAMETER_FN (EFFECTS_PARAMETER_CODE + 4U)
+#define EFFECTS_PARAMETER_TONING (EFFECTS_PARAMETER_FN + 4U)
+#define EFFECTS_STRIDE (EFFECTS_PARAMETER_TONING + 4U)
 #define EFFECTS_NO_RECORD 0xffffffffU
 /* The status of an effect that installed, of one that is Off, of one past
    MAX_COUNT, and of one whose file changed during the start. */
@@ -54,7 +60,7 @@ static u32 effects_count(volatile u32 *h) {
 }
 static volatile u32 *effects_word(volatile u32 *h,u32 offset) { return MANAGE_MAP(h[GRKIT_HOST_EFFECTS/4]+offset); }
 static u32 effects_entry(volatile u32 *h,u32 effect) { return h[GRKIT_HOST_EFFECTS/4]+EFFECTS_HEADER+effect*EFFECTS_STRIDE; }
-static u32 effects_handle(volatile u32 *h,u32 effect) { return effects_word(h,EFFECTS_SETTINGS)[0]+effect; }
+static u32 effects_handle(volatile u32 *h,u32 effect) { return effects_word(h,EFFECTS_SETTINGS)[0]+MANAGE_MAP(effects_entry(h,effect)+EFFECTS_SLOT)[0]; }
 static u32 effects_choice(volatile u32 *h,u32 effect) { return setting_value(h,effects_handle(h,effect)); }
 static u32 effects_off(volatile u32 *h,u32 effect) { return effects_choice(h,effect)&1U; }
 static u32 effects_key(volatile u32 *h,u32 effect) {

@@ -333,11 +333,11 @@ fn package_roundtrip_and_output_ownership() {
         text(&zip),
     ];
     let packaged = success(&args);
-    // Thirteen runtime, package list, and document entries (a core file for
+    // Fourteen runtime, package list, and document entries (a core file for
     // each GR III build), the official modules, then one per effect.
     assert_eq!(
         packaged["entries"],
-        13 + grkit_core::modules::OFFICIAL.len() + source_count()
+        14 + grkit_core::modules::OFFICIAL.len() + source_count()
     );
     assert_eq!(success(&["verify", text(&zip)])["effects"], source_count());
     let before = fs::read(&zip).unwrap();
@@ -459,7 +459,7 @@ fn package_installs_the_given_modules() {
         "--out",
         text(&zip),
     ]);
-    assert_eq!(packaged["entries"], 15 + source_count());
+    assert_eq!(packaged["entries"], 16 + source_count());
     assert_eq!(packaged["modules"], json!(["DATE", "FILMLOOK"]));
     let verified = success(&["verify", text(&zip)]);
     assert_eq!(verified["modules"], json!(["DATE", "FILMLOOK"]));
@@ -477,7 +477,7 @@ fn package_installs_the_given_modules() {
         "--out",
         text(&stamp_only),
     ]);
-    assert_eq!(packaged["entries"], 14);
+    assert_eq!(packaged["entries"], 15);
     assert_eq!(success(&["verify", text(&stamp_only)])["effects"], 0);
     // Image Control alone without effects, effects without Image Control, a
     // module twice, and a missing module file show nothing or fail.
@@ -751,7 +751,7 @@ fn site_export_publishes_only_the_verified_runtime() {
     let site = tmp.path().join("site");
     let result = success(&["site", "--build", text(&build), "--out", text(&site)]);
     assert_eq!(result["target"], "gr3-2.10");
-    assert_eq!(result["files"], 7);
+    assert_eq!(result["files"], 8);
 
     let exported = site.join("runtime/gr3-2.10");
     assert_eq!(

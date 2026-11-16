@@ -144,11 +144,13 @@ pub struct Target {
 
 /// The builds of one camera line, such as each GR IV build. They share the
 /// runtime code, the hooks, and the header `runtime/targets/<family>.h`.
-/// Builds of a family also have the same header definitions (tests), so a
-/// change for one build fails until it reaches each build.
+/// A verified hook variant keeps the camera-line name and shared header,
+/// but has its own Rust definition and hook contract.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Family {
     pub name: &'static str,
+    /// The Rust constant in the camera-line module, preserved by the porter.
+    pub definition: &'static str,
     /// The hooks of each build, in installation order. A build gives the site
     /// of each hook (`Layout::sites`).
     pub hooks: &'static [HookSpec],

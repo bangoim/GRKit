@@ -92,7 +92,7 @@ static volatile unsigned *mapped_settings(unsigned address)
    of the Effects page. */
 #define TEST_MANAGE 0x5e000000U
 #define TEST_EFFECTS (TEST_MANAGE + 0x300U)
-static unsigned manage_memory[(TEST_EFFECTS - TEST_MANAGE + 12 + 3 * 44) / 4];
+static unsigned manage_memory[(TEST_EFFECTS - TEST_MANAGE + 12 + 64 * 60) / 4];
 /* The module list: the header, then module i at word MANAGE_ENTRY(i). */
 #define MANAGE_ENTRY(i) (MANAGE_HEADER / 4 + (i) * 14)
 static volatile unsigned *mapped_manage(unsigned address)
@@ -108,7 +108,7 @@ static volatile unsigned *mapped_manage(unsigned address)
 #define DATE_LOOK settings_memory[9]
 /* The services block of the core (runtime/services.h). */
 #define TEST_SERVICES 0x5c000000U
-static unsigned services_memory[0x4000];
+static unsigned services_memory[0x9000];
 static volatile unsigned *mapped_services(unsigned address)
 {
     assert(address >= TEST_SERVICES && address < TEST_SERVICES + sizeof(services_memory) && !(address & 3));
@@ -171,7 +171,8 @@ static unsigned native_sets_count, native_type_shown;
 static void native_set_record(const char *const *argv);
 #define NATIVE_SETTINGS() 0U
 #define NATIVE_SET(argv) native_set_record(argv)
-#define NATIVE_MONOCHROME() 0U
+static unsigned test_native_monochrome;
+#define NATIVE_MONOCHROME() test_native_monochrome
 #define NATIVE_SET_TYPE(code) ((void)(code), ++native_sets_count)
 #define NATIVE_SET_EV(n) ((void)(n), ++native_sets_count)
 #define NATIVE_SET_EV_BITS(b) ((void)(b), ++native_sets_count)
@@ -210,6 +211,8 @@ static unsigned dial_timer_start(unsigned ms)
 static unsigned persist_timer_ids, persist_timer_ms, persist_barriers;
 #define PERSIST_TIMER_START(ms) (persist_timer_ms = (ms), 0x10000U + ++persist_timer_ids)
 #define PERSIST_BARRIER() (++persist_barriers)
+#define CONTROL_BARRIER() __atomic_thread_fence(__ATOMIC_SEQ_CST)
+#define LOOK_PUBLISH_MAP(address) mapped(address)
 /* The native slots of the user modes (runtime/mode_dial.h): a settings
    record of the test at TEST_RECORD, whose byte 0 marks its content and
    which holds the name of slot n at TEST_NAME(n) and its registered flag at
@@ -271,6 +274,40 @@ static uintptr_t test_select_method(uintptr_t address);
 #define CALL3(a) ((unsigned (*)(unsigned,unsigned,unsigned))test_select_method((uintptr_t)(a)))
 #define CALL4(a) ((unsigned (*)(unsigned,unsigned,unsigned,unsigned))test_select_method((uintptr_t)(a)))
 #define CALL5(a) ((unsigned (*)(unsigned,unsigned,unsigned,unsigned,unsigned))test_select_method((uintptr_t)(a)))
+#undef LOOK_PUBLISH_CURRENT_CONTROLLER
+static unsigned test_native_controller = ~0U;
+static unsigned test_capture_idle = 1, test_capture_pending, test_capture_count, test_capture_be_busy;
+static unsigned test_capture_race, test_capture_count_calls;
+#ifndef FW_BE_RELEASE_BUSY_OFFSET
+#define FW_BE_RELEASE_BUSY_OFFSET 0xd6U
+#define FW_BE_RECIPE_QUEUE_OFFSET 0x5acU
+#endif
+#define TEST_BE_PROCESS (TEST_OBJECTS+0xe000U)
+static unsigned test_shooting_model(void) { return 1; }
+static unsigned test_all_image_writes(unsigned model) { assert(model==1); return test_capture_idle; }
+static unsigned test_capture_request_pending(unsigned model) { assert(model==1); return test_capture_pending; }
+static unsigned test_be_process(void) {
+    object_memory[(0xe000U+FW_BE_RECIPE_QUEUE_OFFSET)/4]=2;
+    ((unsigned char *)object_memory)[0xe000U+FW_BE_RELEASE_BUSY_OFFSET]=(unsigned char)test_capture_be_busy;
+    return TEST_BE_PROCESS;
+}
+static unsigned test_be_recipe_count(unsigned queue) {
+    assert(queue==2);
+    ++test_capture_count_calls;
+    if(test_capture_race) test_capture_pending=1;
+    return test_capture_count;
+}
+#undef FW_SHOOTING_MODEL
+#undef FW_CAPTURE_REQUEST_PENDING
+#undef FW_ALL_IMAGE_WRITES_COMPLETE
+#undef FW_BE_STILL_PROCESS
+#undef FW_BE_ACTIVE_RECIPE_COUNT
+#define FW_SHOOTING_MODEL test_shooting_model
+#define FW_CAPTURE_REQUEST_PENDING test_capture_request_pending
+#define FW_ALL_IMAGE_WRITES_COMPLETE test_all_image_writes
+#define FW_BE_STILL_PROCESS test_be_process
+#define FW_BE_ACTIVE_RECIPE_COUNT test_be_recipe_count
+#define LOOK_PUBLISH_CURRENT_CONTROLLER(h) (test_native_controller != ~0U ? test_native_controller : services_word(h,SERVICES_MENU+MENU_ROWS_CURRENT)[0])
 #include "menu.c"
 _Static_assert(SERVICES_SIZE <= sizeof(services_memory), "The test maps the services block");
 static void native_set_record(const char *const *argv)
@@ -344,8 +381,20 @@ static unsigned *object_at(unsigned address)
     assert(address >= TEST_OBJECTS && address < TEST_OBJECTS + sizeof(object_memory) && !(address & 3));
     return &object_memory[(address - TEST_OBJECTS) / 4];
 }
+#define REPLACE_BANK 0x60000000U
+#define REPLACE_ICONS 0x61000000U
+#define REPLACE_TAIL 0x62000000U
+#define REPLACE_PROFILE 0x63000000U
+static unsigned char replace_bank[GRKIT_TEXT_RECORDS*GRKIT_RECORD_SIZE];
+static unsigned char replace_icons[3*GRKIT_ICONS_PER_CHUNK*GRKIT_ICON_STRIDE];
+static unsigned char replace_tail[GRKIT_TAIL_SIZE];
+static unsigned char replace_profile[GRKIT_GRF_MAX_SIZE];
 static unsigned char *mapped(unsigned address)
 {
+    if(address-REPLACE_BANK<sizeof(replace_bank)) return replace_bank+address-REPLACE_BANK;
+    if(address-REPLACE_ICONS<sizeof(replace_icons)) return replace_icons+address-REPLACE_ICONS;
+    if(address-REPLACE_TAIL<sizeof(replace_tail)) return replace_tail+address-REPLACE_TAIL;
+    if(address-REPLACE_PROFILE<sizeof(replace_profile)) return replace_profile+address-REPLACE_PROFILE;
     unsigned services = (unsigned)(unsigned long)services_memory;
     if (address - TEST_RECORD < sizeof(record_memory)) return record_memory + (address - TEST_RECORD);
     if (address - services < sizeof(services_memory)) return (unsigned char *)services_memory + (address - services);
@@ -1083,11 +1132,12 @@ static void module_tiles_follow_the_effect_icons(void)
     test_header[GRKIT_HOST_ACTIVE / 4] = 0x59005000;
     test_header[GRKIT_HOST_COUNT / 4] = 5;
     /* Module tiles follow the effect icons in the chunks: slot
-       GRKIT_HOST_ICON_COUNT + effects + n. */
+       GRKIT_HOST_ICON_COUNT + 2 * capacity + n. */
     test_header[GRKIT_HOST_ICON_CHUNKS / 4] = 0x59100000;
-    test_header[GRKIT_HOST_ICON_CHUNKS / 4 + 1] = 0x59200000;
+    test_header[GRKIT_HOST_ICON_CHUNKS / 4 + 2] = 0x59100000;
+    test_header[GRKIT_HOST_ICON_CHUNKS / 4 + 3] = 0x59200000;
     {
-        u32 first = GRKIT_HOST_ICON_COUNT + 5;
+        u32 first = (GRKIT_HOST_ICON_COUNT + 2 * GRKIT_TEXT_RECORDS) % GRKIT_ICONS_PER_CHUNK;
         assert(menu_icon(GRKIT_ICON_MODULE_TILE(0)) == 0x59100000 + first * GRKIT_ICON_STRIDE);
         assert(menu_icon(GRKIT_ICON_MODULE_TILE(40 - first)) == 0x59200000);
         assert(menu_icon(GRKIT_ICON_MODULE_TILE(41 - first)) == 0x59200000 + GRKIT_ICON_STRIDE);
@@ -2764,17 +2814,18 @@ static void the_adj_order_page_has_a_row_for_each_module(void)
    them on or off with effects_turn. */
 static void install_effect_list(void)
 {
-    _Static_assert(EFFECTS_STRIDE == 44 && EFFECTS_HEADER == 8, "The test list matches effects.h");
+    _Static_assert(EFFECTS_STRIDE == 60 && EFFECTS_HEADER == 8, "The test list matches effects.h");
     static const char *const effect_names[] = {"Portra 400", "Velvia 100", "Gold 200"};
     volatile unsigned *list = &manage_memory[(TEST_EFFECTS - TEST_MANAGE) / 4];
     settings_memory[0] = 15;
     for (u32 i = 0; i < 3; ++i) {
         settings_memory[2 + (12 + i) * 3 + 1] = i == 2;
         settings_memory[2 + (12 + i) * 3 + 2] = EFFECT_CHOICE_VALUES;
-        list[2 + i * 11] = i == 2 ? EFFECT_OFF : EFFECT_LOADED;
-        list[2 + i * 11 + 1] = i == 2 ? EFFECTS_NO_RECORD : i;
-        memset((void *)&list[2 + i * 11 + 2], 0, 36);
-        ascii((unsigned short *)&list[2 + i * 11 + 2], effect_names[i]);
+        list[2 + i * (EFFECTS_STRIDE/4)] = i == 2 ? EFFECT_OFF : EFFECT_LOADED;
+        list[2 + i * (EFFECTS_STRIDE/4) + 1] = i == 2 ? EFFECTS_NO_RECORD : i;
+        list[2 + i * (EFFECTS_STRIDE/4) + EFFECTS_SLOT/4] = i;
+        memset((void *)&list[2 + i * (EFFECTS_STRIDE/4) + 2], 0, 36);
+        ascii((unsigned short *)&list[2 + i * (EFFECTS_STRIDE/4) + 2], effect_names[i]);
     }
     list[0] = 3; list[1] = 12;
 }
@@ -5703,7 +5754,7 @@ static void persistence_exports_shared_values_while_a_snapshot_applies(void)
     assert(p[GRKIT_PERSIST_REVISION / 4] == 2);
     assert(persist_test_core(GRKIT_CORE_TONE) == 0x8123);
     assert(persist_test_core(GRKIT_CORE_CROP) == 3 && persist_test_core(GRKIT_CORE_BORDER) == 2);
-    assert(p[GRKIT_PERSIST_EFFECTS / 4] == 0x123);
+    assert(p[GRKIT_PERSIST_EFFECTS / 4] == look_parameter_code((const u8 *)"a"));
     assert(p[GRKIT_PERSIST_EFFECTS / 4 + 1] == 101 && p[GRKIT_PERSIST_EFFECTS / 4 + 2] == 2);
     assert(persist_test_module(0) == 4);
     /* Continuous temporary changes and other files' counters cannot
@@ -5734,6 +5785,38 @@ static void persistence_exports_shared_values_while_a_snapshot_applies(void)
    three globals, and four kept settings of missing modules. Kept entries
    remain global; only dial-owned settings and all effect adjustments use
    the shared copy while a user-mode snapshot applies. */
+static void persistence_keeps_all_unloaded_id_parameters(void)
+{
+    volatile u32 *h=test_header;
+    dial_reset();
+    h[GRKIT_HOST_EFFECTS/4]=TEST_EFFECTS;
+    effects_word(h,EFFECTS_COUNT)[0]=EFFECTS_LISTED;
+    for(u32 row=0;row<EFFECTS_LISTED;++row) {
+        volatile u32 *entry=MANAGE_MAP(effects_entry(h,row));
+        entry[EFFECTS_RECORD/4]=EFFECTS_NO_RECORD;
+        u8 *id=(u8 *)services_word(h,SERVICES_LOOK_IDS)+row*32;
+        memset(id,0,32); snprintf((char *)id,32,"unloaded%u",row);
+        entry[EFFECTS_PARAMETER_CODE/4]=look_parameter_code(id);
+        entry[EFFECTS_PARAMETER_FN/4]=200+row;
+        entry[EFFECTS_PARAMETER_TONING/4]=row%9;
+    }
+    volatile u32 *saved=persist_test_buffer();
+    persist_capture(h,saved);
+    assert(saved[GRKIT_PERSIST_EFFECT_COUNT/4]==EFFECTS_LISTED);
+    u32 offset=GRKIT_PERSIST_EFFECTS/4+(EFFECTS_LISTED-1)*GRKIT_PERSIST_EFFECT_WORDS;
+    assert(saved[offset]==look_parameter_code((const u8 *)"unloaded63") && saved[offset+1]==263 && saved[offset+2]==0);
+    for(u32 row=0;row<EFFECTS_LISTED;++row) for(u32 k=0;k<8;++k)
+        assert(saved[GRKIT_PERSIST_EFFECTS/4+row*GRKIT_PERSIST_EFFECT_WORDS+3+k]==
+            look_parameter_id_word((const volatile u8 *)services_word(h,SERVICES_LOOK_IDS)+row*32,k));
+    MANAGE_MAP(effects_entry(h,0))[EFFECTS_PARAMETER_CODE/4]=0xffffffffU;
+    persist_capture(h,saved);
+    assert(saved[GRKIT_PERSIST_EFFECT_COUNT/4]==63 && saved[GRKIT_PERSIST_EFFECTS/4]==look_parameter_code((const u8 *)"unloaded1"));
+    assert(!saved[offset] && !saved[offset+1]);
+    effects_word(h,EFFECTS_COUNT)[0]=0;
+    persist_capture(h,saved);
+    assert(!saved[GRKIT_PERSIST_EFFECT_COUNT/4] && !saved[offset+1]);
+}
+
 static void persistence_exports_the_capacity_boundaries_in_user_modes(void)
 {
     volatile u32 *h = test_header, *p;
@@ -5751,6 +5834,8 @@ static void persistence_exports_the_capacity_boundaries_in_user_modes(void)
     manage_memory[MANAGE_START / 4] = kept - 1;
     manage_memory[MANAGE_UNIT / 4] = kept;
     for (u32 i = 0; i < GRKIT_TEXT_RECORDS; ++i) {
+        u8 *id=mapped(dial_record(i)+GRKIT_RECORD_ID);
+        memset(id,0,32); snprintf((char *)id,32,"capacity%u",i);
         HALF(dial_record(i), GRKIT_RECORD_CODE) = (u16)(0x8000U + i);
         recipe_fn_write(dial_record(i), i + 100);
         BYTE(dial_record(i), GRKIT_RECORD_TONING) = (u8)(i % 9);
@@ -5765,7 +5850,7 @@ static void persistence_exports_the_capacity_boundaries_in_user_modes(void)
     persist_baseline(h, p);
     assert(p[GRKIT_PERSIST_EFFECT_COUNT / 4] == GRKIT_TEXT_RECORDS);
     assert(p[GRKIT_PERSIST_MODULE_COUNT / 4] == GRKIT_MODULE_SETTINGS_MAX);
-    assert(p[effect_at] == last_effect && p[effect_at + 1] == last_effect + 100 && p[effect_at + 2] == last_effect % 9);
+    assert(p[effect_at] == look_parameter_code((const u8 *)"capacity39") && p[effect_at + 1] == last_effect + 100 && p[effect_at + 2] == last_effect % 9);
     assert(p[module_at] == 1000 + last_setting && p[module_at + 1] == last_setting + 10);
     assert(p[GRKIT_PERSIST_MODULES / 4 + (owned - 3) * GRKIT_PERSIST_MODULE_WORDS] == 0);
     assert(persist_test_module(owned - 3) == 0 && persist_test_module(owned - 2) == 0);
@@ -5823,7 +5908,7 @@ static void persistence_freezes_the_complete_file_until_release(void)
     persist_poll(h);
     assert(persist_barriers == barriers + 2 && p[GRKIT_PERSIST_READY / 4] == 2);
     assert(p[GRKIT_PERSIST_REVISION / 4] == 2 && persist_test_core(GRKIT_CORE_CROP) == 4);
-    assert(p[GRKIT_PERSIST_EFFECTS / 4 + 4] == 18 && p[GRKIT_PERSIST_EFFECTS / 4 + 5] == 6);
+    assert(p[GRKIT_PERSIST_EFFECTS / 4 + GRKIT_PERSIST_EFFECT_WORDS + 1] == 18 && p[GRKIT_PERSIST_EFFECTS / 4 + GRKIT_PERSIST_EFFECT_WORDS + 2] == 6);
     assert(persist_test_module(0) == 0); /* A zero value must still save. */
     persist_test_request(3);
     assert(p[GRKIT_PERSIST_REVISION / 4] == 2);
@@ -5901,8 +5986,449 @@ static void persistence_timer_runs_in_menus_and_preserves_early_dirty_values(voi
     assert(dial_word(h, DIAL_TIMER)[0] == dial_timer_ids);
 }
 
+static void look_publication_waits_for_durable_commit(void)
+{
+    volatile u32 *h=test_header;
+    volatile struct look_publish *p;
+    u8 *profile;
+    dial_reset();
+    h[GRKIT_HOST_EFFECTS/4]=TEST_EFFECTS;
+    effects_word(h,EFFECTS_COUNT)[0]=0;
+    effects_word(h,EFFECTS_SETTINGS)[0]=30;
+    settings_memory[0]=40;
+    for(u32 i=30;i<40;++i) memset(&settings_memory[SETTINGS_ENTRY(i)],0,12);
+    h[GRKIT_HOST_ICON_CHUNKS/4]=TEST_OBJECTS;
+    h[GRKIT_HOST_OFF_ICON/4]=TEST_OBJECTS+0xb000;
+    WORD(h[GRKIT_HOST_OFF_ICON/4],GRKIT_ICON_STRIDE-GRKIT_GRF_ICON_SIZE-4)=0;
+    services_word(h,SERVICES_MENU+MENU_ROWS_CURRENT)[0]=SHOOTING_CONTROLLER;
+    p=(volatile struct look_publish *)services_word(h,SERVICES_LOOK_PUBLISH);
+    memset((void *)p,0,sizeof(*p));
+    p->token[0]=7;
+    p->profile=TEST_OBJECTS+0x7000;
+    p->length=GRKIT_GRF_SIZE;
+    p->enabled=1;
+    memcpy((void *)p->name,"My LUT",7);
+    profile=mapped(p->profile);
+    memset(profile,0,GRKIT_GRF_SIZE);
+    memcpy(profile+GRKIT_GRF_ID,"imported-test",14);
+    memcpy(profile+GRKIT_GRF_NAME,"Embedded",9);
+    /* Admission is enforced in App even for a producer bypassing HTTP. */
+    test_native_monochrome=1;
+    p->request=LOOK_PUBLISH_PREPARE;
+    look_publish_poll(h,p);
+    assert(p->result==LOOK_PUBLISH_UNSUPPORTED && !p->prepared && !effects_count(h));
+    profile[GRKIT_GRF_FLAGS]=1;
+    for(u32 mono=0;mono<2;++mono) {
+        test_native_monochrome=mono;
+        p->request=0; ++p->token[0]; p->request=LOOK_PUBLISH_PREPARE;
+        look_publish_poll(h,p);
+        assert(!p->result && p->prepared);
+        p->request=LOOK_PUBLISH_CANCEL; look_publish_poll(h,p);
+        assert(!p->result && !p->prepared);
+    }
+    test_native_monochrome=0; profile[GRKIT_GRF_FLAGS]=0;
+    /* The native page is reserved across models; admission never remaps it. */
+    memset(profile+GRKIT_GRF_ID,0,32); memcpy(profile+GRKIT_GRF_ID,"look20233",10);
+    p->request=0; ++p->token[0]; p->request=LOOK_PUBLISH_PREPARE;
+    look_publish_poll(h,p);
+    assert(p->result==LOOK_PUBLISH_CONFLICT && !p->prepared);
+    memset(profile+GRKIT_GRF_ID,0,32); memcpy(profile+GRKIT_GRF_ID,"imported-test",14);
+    p->request=0; p->token[0]=7;
+    BYTE(dial_record(0),GRKIT_RECORD_PARAMETERS)=6;
+    dial_snapshot(h); dial_word(h,DIAL_ACTIVE)[0]=1;
+    BYTE(dial_record(0),GRKIT_RECORD_PARAMETERS)=4;
+    p->request=LOOK_PUBLISH_PREPARE;
+    look_publish_poll(h,p);
+    assert(p->done==LOOK_PUBLISH_PREPARE && p->result==LOOK_PUBLISH_OK && p->prepared);
+    assert(h[GRKIT_HOST_COUNT/4]==2 && effects_count(h)==0);
+    assert(!settings_memory[SETTINGS_ENTRY(30)]);
+    {
+        u32 state=h[GRKIT_HOST_STATE_CHANGES/4],recipe=h[GRKIT_HOST_RECIPES/4],dial_changes=h[GRKIT_HOST_DIAL_SET_CHANGES/4];
+        u32 value=setting_value(h,0);
+        setting_store(h,0,value ? 0 : 1);
+        tone_store(h,1);
+        assert(!menu_parameter_set(0,4));
+        assert(recipe_save(h)==RECIPE_SAVE_BUSY);
+        assert(recipe_apply(h,0)==RECIPE_BUSY);
+        recipe_delete(h,0);
+        dial_save(h,1);
+        native_ic_selected(h);
+        assert(setting_value(h,0)==value && !h[GRKIT_HOST_ACTIVE/4]);
+        assert(h[GRKIT_HOST_RECIPES/4]==recipe && h[GRKIT_HOST_STATE_CHANGES/4]==state);
+        assert(h[GRKIT_HOST_DIAL_SET_CHANGES/4]==dial_changes && p->deferred_native);
+    }
+    /* Aborted persistence releases the reservation without publishing it. */
+    p->request=LOOK_PUBLISH_CANCEL;
+    look_publish_poll(h,p);
+    assert(!p->result && !p->prepared && h[GRKIT_HOST_COUNT/4]==2);
+    control_poll(h);
+    assert(!p->deferred_native && GRKIT_LOOK_MUTATION_ALLOWED(h));
+    p->request=0; p->token[0]=8; p->request=LOOK_PUBLISH_PREPARE;
+    look_publish_poll(h,p);
+    assert(!p->result && p->prepared);
+    /* The owner has committed, but an open native list must finish first. */
+    p->request=LOOK_PUBLISH_COMMIT;
+    services_word(h,SERVICES_MENU+MENU_ROWS_CURRENT)[0]=SETTINGS_SUBMENU;
+    look_publish_poll(h,p);
+    assert(p->done==LOOK_PUBLISH_PREPARE && h[GRKIT_HOST_COUNT/4]==2);
+    services_word(h,SERVICES_MENU+MENU_ROWS_CURRENT)[0]=SHOOTING_CONTROLLER;
+    /* A shot may start after PREPARE. Durable commit stays pending across
+       separate processing packets until the whole native capture is idle. */
+    test_capture_idle=0;
+    look_publish_poll(h,p);
+    assert(p->prepared && p->done==LOOK_PUBLISH_PREPARE && h[GRKIT_HOST_COUNT/4]==2);
+    look_publish_poll(h,p);
+    assert(p->prepared && p->done==LOOK_PUBLISH_PREPARE && h[GRKIT_HOST_COUNT/4]==2);
+    test_capture_idle=1;
+    look_publish_poll(h,p);
+    assert(p->done==LOOK_PUBLISH_COMMIT && !p->result && !p->prepared);
+    assert(h[GRKIT_HOST_COUNT/4]==3 && effects_count(h)==1);
+    assert(dial_word(h,DIAL_BASE_RECORDS)[0]==3);
+    assert(persist_fn_value(h,dial_record(0),0)==6 && persist_fn_value(h,dial_record(2),2)==0);
+    assert(effects_record(h,0)==2 && !effects_off(h,0));
+    assert(HALF(dial_record(2),GRKIT_RECORD_NAME)=='M');
+    look_publish_poll(h,p);
+    assert(h[GRKIT_HOST_COUNT/4]==3);
+    p->request=LOOK_PUBLISH_CANCEL;
+    look_publish_poll(h,p);
+    assert(p->result==LOOK_PUBLISH_CONFLICT && h[GRKIT_HOST_COUNT/4]==3);
+    p->request=0; p->token[0]=9; p->request=LOOK_PUBLISH_PREPARE;
+    look_publish_poll(h,p);
+    assert(p->result==LOOK_PUBLISH_CONFLICT && !p->prepared);
+    assert(h[GRKIT_HOST_COUNT/4]==3 && effects_count(h)==1);
+    {
+        struct look_telemetry snapshot;
+        volatile struct look_telemetry *t=(volatile struct look_telemetry *)services_word(h,SERVICES_LOOK_TELEMETRY);
+        memset((void *)t,0,sizeof(*t));
+        h[GRKIT_HOST_CAPABILITIES/4]|=GRKIT_CORE_TONE_BIT;
+        h[GRKIT_HOST_ACTIVE/4]=dial_record(2);
+        look_telemetry_capture(h);
+        assert(look_telemetry_copy(t,&snapshot));
+        assert(snapshot.count==1 && snapshot.entries[0].enabled && snapshot.entries[0].loaded && snapshot.revision==1);
+        assert(snapshot.record_count==3 && !memcmp(snapshot.records[2].id,"imported-test",14));
+        assert(!memcmp(snapshot.selected_id,"imported-test",14));
+        effects_turn(h,0,1);
+        look_telemetry_capture(h);
+        assert(look_telemetry_copy(t,&snapshot));
+        assert(!snapshot.entries[0].enabled && !snapshot.selected_id[0] && snapshot.revision==2);
+        h[GRKIT_HOST_RECIPES/4]=RECIPE_USED|RECIPE_LOOK_EFFECT|recipe_effect_code(dial_record(2))<<RECIPE_CODE_SHIFT;
+        h[GRKIT_HOST_RECIPE_IDS/4]=123;
+        GRKIT_RECIPES_CHANGED(h);
+        look_telemetry_capture(h);
+        assert(look_telemetry_copy(t,&snapshot));
+        assert((snapshot.entries[0].recipes[0]&1) && snapshot.recipe_ids[0]==123 && snapshot.revision==3);
+        look_telemetry_capture(h);
+        assert(t->revision==3);
+        t->seq|=1;
+        assert(!look_telemetry_copy(t,&snapshot));
+        memset((void *)t,0,sizeof(*t));
+    }
+    /* Full logical capacity still supports repeated immutable replacement. */
+    h[GRKIT_HOST_TAIL/4]=REPLACE_TAIL;
+    h[GRKIT_HOST_RECORD_BANK2/4]=REPLACE_BANK;
+    memset(replace_tail,0,sizeof(replace_tail));
+    memset(replace_bank,0,sizeof(replace_bank));
+    memset(replace_icons,0,sizeof(replace_icons));
+    for(u32 i=0;i<3;++i) h[GRKIT_HOST_ICON_CHUNKS/4+i]=REPLACE_ICONS+i*GRKIT_ICONS_PER_CHUNK*GRKIT_ICON_STRIDE;
+    h[GRKIT_HOST_OFF_ICON/4]=REPLACE_ICONS;
+    h[GRKIT_HOST_COUNT/4]=GRKIT_TEXT_RECORDS;
+    for(u32 i=3;i<GRKIT_TEXT_RECORDS;++i) {
+        memset(mapped(dial_record(i)),0,GRKIT_RECORD_SIZE);
+        HALF(dial_record(i),GRKIT_RECORD_CODE)=(u16)(0x9000+i);
+    }
+    p->action=LOOK_PUBLISH_REPLACE; p->profile=REPLACE_PROFILE;
+    memset(replace_profile,0,sizeof(replace_profile));
+    memcpy(replace_profile+GRKIT_GRF_ID,"imported-test",14);
+    memcpy((void *)p->name,"Replaced",9);
+    p->enabled=1;
+    h[GRKIT_HOST_FRAME_CANVAS/4]=0x68000000U;
+    u32 old=dial_record(2),current=old;
+    h[GRKIT_HOST_ACTIVE/4]=old;
+    BYTE(old,GRKIT_RECORD_PARAMETERS)=3; BYTE(old,GRKIT_RECORD_TONING)=2;
+    BYTE(dial_record(0),GRKIT_RECORD_PARAMETERS)=2;
+    dial_snapshot(h); dial_word(h,DIAL_ACTIVE)[0]=1;
+    BYTE(old,GRKIT_RECORD_PARAMETERS)=7; BYTE(old,GRKIT_RECORD_TONING)=1;
+    BYTE(dial_record(0),GRKIT_RECORD_PARAMETERS)=8;
+    u8 old_hash[32];
+    memcpy(old_hash,(const void *)services_word(h,SERVICES_LOOK_HASHES+64),32);
+    p->request=0; ++p->token[0]; p->request=LOOK_PUBLISH_PREPARE;
+    look_publish_poll(h,p);
+    assert(!p->result && p->prepared && record_address(h,2)==old);
+    assert(!memcmp(old_hash,(const void *)services_word(h,SERVICES_LOOK_HASHES+64),32));
+    p->request=LOOK_PUBLISH_CANCEL; look_publish_poll(h,p);
+    assert(!p->result && record_address(h,2)==old);
+    for(u32 iteration=0;iteration<6;++iteration) {
+        p->request=0; ++p->token[0]; p->request=LOOK_PUBLISH_PREPARE;
+        look_publish_poll(h,p);
+        assert(!p->result && p->prepared);
+        assert(record_address(h,2)==current);
+        h[GRKIT_HOST_ACTIVE/4]=current;
+        p->request=LOOK_PUBLISH_COMMIT; look_publish_poll(h,p);
+        assert(!p->result && !p->prepared && h[GRKIT_HOST_COUNT/4]==GRKIT_TEXT_RECORDS);
+        u32 next=record_address(h,2);
+        assert(next!=current && h[GRKIT_HOST_ACTIVE/4]==next);
+        assert(preview_invalidated==h[GRKIT_HOST_FRAME_CANVAS/4]);
+        assert(HALF(next,GRKIT_RECORD_NAME)=='R' && effects_record(h,0)==2);
+        assert(persist_fn_value(h,next,2)==3 && persist_toning_value(h,next,2)==2);
+        assert(dial_word(h,DIAL_BASE_CORE+4U*(GRKIT_CORE_TONE-GRKIT_CORE_SETTING_BASE))[0]==3);
+        current=next;
+        record_read_enter(h);
+        p->request=0; ++p->token[0]; p->request=LOOK_PUBLISH_PREPARE;
+        look_publish_poll(h,p);
+        assert(p->result==LOOK_PUBLISH_BUSY && !p->prepared);
+        record_read_leave(h);
+    }
+    /* A deleted logical slot is reusable at full capacity after its readers exit. */
+    p->retired[0]|=1U<<2;
+    p->retire_wait[0]|=1U<<2;
+    effects_word(h,EFFECTS_COUNT)[0]=0;
+    p->action=LOOK_PUBLISH_ADD;
+    p->request=0; ++p->token[0]; p->request=LOOK_PUBLISH_PREPARE;
+    look_publish_poll(h,p);
+    assert(!p->result && p->slot==2);
+    p->request=LOOK_PUBLISH_COMMIT; look_publish_poll(h,p);
+    assert(!p->result && h[GRKIT_HOST_COUNT/4]==GRKIT_TEXT_RECORDS && effects_count(h)==1);
+    assert(!(p->retired[0]&(1U<<2)) && effects_record(h,0)==2);
+    assert(persist_fn_value(h,record_address(h,2),2)==0 && persist_toning_value(h,record_address(h,2),2)==0);
+    assert(!persist_core_value(h,GRKIT_CORE_TONE-GRKIT_CORE_SETTING_BASE));
+    assert(persist_fn_value(h,dial_record(0),0)==2);
+    /* Unloaded entries can change content/name without consuming a slot. */
+    effects_word(h,EFFECTS_COUNT)[0]=2;
+    u32 pending=effects_entry(h,1);
+    MANAGE_MAP(pending)[EFFECTS_SLOT/4]=1;
+    MANAGE_MAP(pending)[EFFECTS_RECORD/4]=EFFECTS_NO_RECORD;
+    MANAGE_MAP(pending)[EFFECTS_STATUS/4]=EFFECT_OFF;
+    settings_memory[SETTINGS_ENTRY(31)]=look_publish_key((const u8 *)"pending");
+    settings_memory[SETTINGS_ENTRY(31)+1]=1;
+    memcpy((void *)((volatile u8 *)services_word(h,SERVICES_LOOK_IDS)+32),"pending",8);
+    memset(replace_profile+GRKIT_GRF_ID,0,32);
+    memcpy(replace_profile+GRKIT_GRF_ID,"pending",8);
+    p->action=LOOK_PUBLISH_REPLACE; p->enabled=0;
+    memcpy((void *)p->name,"Pending renamed",16);
+    p->request=0; ++p->token[0]; p->request=LOOK_PUBLISH_PREPARE;
+    look_publish_poll(h,p);
+    assert(!p->result && p->slot==EFFECTS_NO_RECORD);
+    p->request=LOOK_PUBLISH_COMMIT; look_publish_poll(h,p);
+    assert(!p->result && effects_record(h,1)==EFFECTS_NO_RECORD && effects_name(h,1)[0]=='P');
+    assert(h[GRKIT_HOST_COUNT/4]==GRKIT_TEXT_RECORDS);
+    /* No enabled entry is evicted to load another one. */
+    p->enabled=1; p->request=0; ++p->token[0]; p->request=LOOK_PUBLISH_PREPARE;
+    look_publish_poll(h,p);
+    assert(p->result==LOOK_PUBLISH_FULL && !p->prepared);
+    /* A disabled entry's physical slot is reusable; its catalog ID/handle
+       remains available for a subsequent enable. */
+    settings_memory[SETTINGS_ENTRY(30)+1]|=1;
+    dial_word(h,DIAL_BASE_FN+4U*2)[0]=5;
+    ((volatile u8 *)dial_word(h,DIAL_BASE_TONING))[2]=3;
+    dial_word(h,DIAL_BASE_CORE+4U*(GRKIT_CORE_TONE-GRKIT_CORE_SETTING_BASE))[0]=3;
+    h[GRKIT_HOST_ACTIVE/4]=0;
+    p->request=0; ++p->token[0]; p->request=LOOK_PUBLISH_PREPARE;
+    look_publish_poll(h,p);
+    assert(!p->result && p->slot==2 && p->evicted_row==0);
+    p->request=LOOK_PUBLISH_COMMIT; look_publish_poll(h,p);
+    assert(!p->result && effects_record(h,0)==EFFECTS_NO_RECORD && effects_record(h,1)==2);
+    assert(!effects_off(h,1) && effects_off(h,0) && effects_handle(h,0)==30 && effects_handle(h,1)==31);
+    assert(h[GRKIT_HOST_COUNT/4]==GRKIT_TEXT_RECORDS);
+    assert(!persist_fn_value(h,record_address(h,2),2) && !persist_toning_value(h,record_address(h,2),2));
+    assert(!persist_core_value(h,GRKIT_CORE_TONE-GRKIT_CORE_SETTING_BASE));
+    assert(persist_fn_value(h,dial_record(0),0)==2);
+    assert(MANAGE_MAP(effects_entry(h,0))[EFFECTS_PARAMETER_FN/4]==5);
+    assert(MANAGE_MAP(effects_entry(h,0))[EFFECTS_PARAMETER_TONING/4]==3);
+    volatile u32 *saved=persist_test_buffer();
+    persist_capture(h,saved);
+    assert(saved[GRKIT_PERSIST_EFFECT_COUNT/4]==2);
+    assert(saved[GRKIT_PERSIST_EFFECTS/4+1]==5 && saved[GRKIT_PERSIST_EFFECTS/4+2]==3);
+    dial_restore(h);
+    assert(BYTE(record_address(h,2),GRKIT_RECORD_PARAMETERS)==0 && BYTE(record_address(h,2),GRKIT_RECORD_TONING)==0);
+    assert(BYTE(record_address(h,0),GRKIT_RECORD_PARAMETERS)==2 && !h[GRKIT_HOST_ACTIVE/4]);
+    /* Reload A after B reused its slot: its shared Fn delta survives. */
+    settings_memory[SETTINGS_ENTRY(31)+1]|=1;
+    memcpy(replace_profile+GRKIT_GRF_ID,(const void *)services_word(h,SERVICES_LOOK_IDS),32);
+    p->request=0; ++p->token[0]; p->request=LOOK_PUBLISH_PREPARE;
+    look_publish_poll(h,p);
+    assert(!p->result && p->row==0 && p->evicted_row==1);
+    p->request=LOOK_PUBLISH_COMMIT; look_publish_poll(h,p);
+    assert(!p->result && recipe_fn_read(record_address(h,2))==5);
+    assert(persist_fn_value(h,record_address(h,2),2)==5);
+    memset((void *)p,0,sizeof(*p));
+}
+
+static void look_metadata_preserves_slots_and_capture_records(void)
+{
+    volatile u32 *h=test_header;
+    dial_reset();
+    install_effect_list();
+    h[GRKIT_HOST_EFFECTS/4]=TEST_EFFECTS;
+    h[GRKIT_HOST_CAPABILITIES/4]|=GRKIT_CORE_TONE_BIT;
+    services_word(h,SERVICES_MENU+MENU_ROWS_CURRENT)[0]=SHOOTING_CONTROLLER;
+    volatile struct look_publish *p=(volatile struct look_publish *)services_word(h,SERVICES_LOOK_PUBLISH);
+    volatile u8 *ids=(volatile u8 *)services_word(h,SERVICES_LOOK_IDS);
+    u8 *manifest=mapped(TEST_OBJECTS+0x7000);
+    memset((void *)p,0,sizeof(*p));
+    memset(manifest,0,324);
+    memcpy(manifest,"GRKLIB01",8);
+    library_store_put(manifest+8,1);
+    library_store_put(manifest+12,324);
+    library_store_put(manifest+16,3);
+    library_store_put(manifest+20,2);
+    for(u32 row=0;row<3;++row) {
+        memset((void *)(ids+row*32),0,32);
+        ids[row*32]=(u8)('a'+row);
+        u8 *entry=manifest+32+96*row;
+        entry[0]=(u8)('a'+row);
+        for(u32 k=0;k<17;++k) entry[32+k]=(u8)effects_name(h,row)[k];
+    }
+    MANAGE_MAP(effects_entry(h,1))[EFFECTS_PARAMETER_FN/4]=111;
+    MANAGE_MAP(effects_entry(h,2))[EFFECTS_PARAMETER_FN/4]=222;
+    library_store_put(manifest+32+96+84,2); /* Remove b, retain its record. */
+    manifest[320]=2; manifest[322]=0; /* c, a */
+    library_store_put(manifest+24,library_store_crc(manifest,324,24,4));
+    p->action=LOOK_PUBLISH_METADATA; p->manifest=TEST_OBJECTS+0x7000; p->manifest_length=324;
+    p->token[0]=22; p->request=LOOK_PUBLISH_PREPARE;
+    h[GRKIT_HOST_ACTIVE/4]=tone_record(h,2);
+    u32 old_active=h[GRKIT_HOST_ACTIVE/4],old_count=h[GRKIT_HOST_COUNT/4];
+    dial_snapshot(h); dial_word(h,DIAL_ACTIVE)[0]=1;
+    assert(dial_word(h,DIAL_BASE_CORE+4U*(GRKIT_CORE_TONE-GRKIT_CORE_SETTING_BASE))[0]==2);
+    look_publish_poll(h,p);
+    assert(!p->result && p->prepared && effects_count(h)==3 && !effects_off(h,0));
+    assert(h[GRKIT_HOST_ACTIVE/4]==old_active);
+    p->request=LOOK_PUBLISH_COMMIT;
+    look_publish_poll(h,p);
+    assert(!p->result && !p->prepared && effects_count(h)==2);
+    assert(h[GRKIT_HOST_COUNT/4]==old_count && !h[GRKIT_HOST_ACTIVE/4]);
+    assert(!dial_word(h,DIAL_BASE_CORE+4U*(GRKIT_CORE_TONE-GRKIT_CORE_SETTING_BASE))[0]);
+    assert(!persist_core_value(h,GRKIT_CORE_TONE-GRKIT_CORE_SETTING_BASE));
+    assert(effects_handle(h,0)==12 && effects_handle(h,1)==14);
+    assert(effects_at(h,0)==1 && effects_at(h,1)==0);
+    assert(effects_off(h,0) && effects_off(h,1));
+    assert(effects_record(h,0)==0 && effects_record(h,1)==EFFECTS_NO_RECORD);
+    assert(ids[0]=='a' && ids[32]=='c');
+    assert(MANAGE_MAP(effects_entry(h,1))[EFFECTS_PARAMETER_FN/4]==222);
+    assert(!MANAGE_MAP(effects_entry(h,2))[EFFECTS_PARAMETER_FN/4]);
+    assert(!GRKIT_LOOK_RECORD_ALLOWED(h,1) && GRKIT_LOOK_RECORD_ALLOWED(h,0));
+    tone_store(h,2);
+    assert(!h[GRKIT_HOST_ACTIVE/4]);
+    assert(recipe_effect(h,recipe_effect_code(tone_record(h,2)))==GRKIT_TEXT_RECORDS);
+    /* A second transaction enables the loaded survivor, using its old slot. */
+    library_store_put(manifest+32+84,1);
+    library_store_put(manifest+24,library_store_crc(manifest,324,24,4));
+    p->request=0; ++p->token[0]; p->request=LOOK_PUBLISH_PREPARE;
+    look_publish_poll(h,p);
+    assert(!p->result);
+    p->request=LOOK_PUBLISH_COMMIT; look_publish_poll(h,p);
+    assert(!p->result && !effects_off(h,0) && effects_handle(h,1)==14);
+    /* Enabling an unloaded survivor needs a record prepare, not a false ack. */
+    library_store_put(manifest+32+192+84,1);
+    library_store_put(manifest+24,library_store_crc(manifest,324,24,4));
+    p->request=0; ++p->token[0]; p->request=LOOK_PUBLISH_PREPARE;
+    look_publish_poll(h,p);
+    assert(p->result==LOOK_PUBLISH_UNSUPPORTED && !p->prepared && effects_off(h,1));
+    /* Deleting the final rows leaves retained records and an empty directory. */
+    for(u32 i=0;i<3;++i) library_store_put(manifest+32+96*i+84,2);
+    library_store_put(manifest+12,320); library_store_put(manifest+20,0);
+    library_store_put(manifest+24,library_store_crc(manifest,320,24,4));
+    p->manifest_length=320;
+    p->request=0; ++p->token[0]; p->request=LOOK_PUBLISH_PREPARE;
+    look_publish_poll(h,p); assert(!p->result);
+    p->request=LOOK_PUBLISH_COMMIT; look_publish_poll(h,p);
+    assert(!p->result && !effects_count(h) && h[GRKIT_HOST_COUNT/4]==old_count);
+    assert(!GRKIT_LOOK_RECORD_ALLOWED(h,0));
+    assert(!MANAGE_MAP(effects_entry(h,1))[EFFECTS_PARAMETER_FN/4]);
+    look_publish_poll(h,p);
+    assert(!p->result && !effects_count(h));
+    memset((void *)p,0,sizeof(*p));
+}
+
+static void control_mailbox_uses_the_app_timer_in_menus(void)
+{
+    volatile u32 *h=test_header;
+    const u32 empty[4]={0,0,0,0}, epoch[4]={1,2,3,4};
+    const u8 nonce[16]={1,0,0,0,2,0,0,0,3,0,0,0,4,0,0,0};
+    volatile struct control_mailbox *box;
+    u32 timer;
+    dial_reset();
+    h[GRKIT_HOST_PERSIST_WORD/4]=1;
+    h[GRKIT_HOST_CONTROL_WORD/4]=1;
+    box=(volatile struct control_mailbox *)SERVICES_MAP(SERVICES_CONTROL_ADDRESS(h[GRKIT_HOST_SERVICES/4]));
+    control_init(box,empty,1);
+    persist_baseline(h,persist_test_buffer());
+    assert(control_submit(box,empty,CONTROL_ATTACH,0,nonce,sizeof(nonce))==1);
+    menu_viewfinder(VIEWFINDER_READY);
+    assert(box->ready==1 && box->result==0 && control_context(box,epoch));
+    assert(control_release(box,1));
+    timer=services_word(h,SERVICES_PERSIST_TIMER)[0];
+    assert(timer);
+    services_word(h,SERVICES_MENU+MENU_ROWS_CURRENT)[0]=SETTINGS_SUBMENU;
+    assert(control_submit(box,epoch,CONTROL_PING,0,0,0)==2);
+    ui_timer_fired(0,timer);
+    assert(box->ready==2 && box->result==0 && box->generation==1);
+    assert(control_release(box,2));
+    assert(services_word(h,SERVICES_PERSIST_TIMER)[0]!=timer);
+    h[GRKIT_HOST_CONTROL_WORD/4]=0;
+}
+
+static void native_icon_draw_retains_the_reader_until_its_epilogue(void)
+{
+    reset();
+    test_header[GRKIT_HOST_TAIL/4]=TEST_OBJECTS-GRKIT_GLOBAL_RECORD_READERS;
+    volatile u32 *readers=&WORD(TEST_OBJECTS,0);
+    assert(!*readers);
+    menu_icon_reader_enter(); assert(*readers==1);
+    /* A nested native draw cannot release the outer draw's pixel lifetime. */
+    menu_icon_reader_enter(); assert(*readers==2);
+    menu_icon_reader_leave(); assert(*readers==1);
+    menu_icon_reader_leave(); assert(!*readers);
+    /* A broken pairing must disable reuse rather than look quiescent. */
+    menu_icon_reader_leave(); assert(*readers==0xffffffffU);
+    menu_icon_reader_enter(); assert(*readers==0xffffffffU);
+    menu_icon_reader_leave(); assert(*readers==0xffffffffU);
+    reset();
+}
+static void capture_idle_requires_both_front_and_backend_completion(void) {
+    reset();
+    test_capture_idle=1;
+    assert(look_publish_capture_idle());
+    test_capture_pending=1;
+    test_capture_count_calls=0;
+    assert(!look_publish_capture_idle() && !test_capture_count_calls);
+    test_capture_pending=0;
+    test_capture_idle=0;
+    assert(!look_publish_capture_idle());
+    test_capture_idle=1;
+    test_capture_count=2;
+    assert(!look_publish_capture_idle());
+    test_capture_count=0;
+    test_capture_be_busy=1;
+    assert(!look_publish_capture_idle());
+    test_capture_be_busy=0;
+    test_capture_race=1;
+    assert(!look_publish_capture_idle());
+    test_capture_race=test_capture_pending=0;
+    assert(look_publish_capture_idle());
+    reset();
+}
+
+static void publication_reads_the_actual_native_controller(void) {
+    dial_reset();
+    volatile u32 *h = test_header;
+    services_word(h,SERVICES_MENU+MENU_ROWS_CURRENT)[0] = 0;
+    test_native_controller = SHOOTING_CONTROLLER;
+    assert(look_publish_ui_ready(h));
+    services_word(h,SERVICES_MENU+MENU_ROWS_CURRENT)[0] = SHOOTING_CONTROLLER;
+    test_native_controller = SETTINGS_SUBMENU;
+    assert(!look_publish_ui_ready(h));
+    test_native_controller = 0;
+    assert(!look_publish_ui_ready(h));
+    test_native_controller = SHOOTING_CONTROLLER;
+    h[GRKIT_HOST_PREVIEW/4] = 1;
+    assert(!look_publish_ui_ready(h));
+    test_native_controller = ~0U;
+    reset();
+}
+
 int main(void)
 {
+    native_icon_draw_retains_the_reader_until_its_epilogue();
     crops_name_the_focal_lengths_of_the_lens();
     fn_steps_the_setting_of_its_row();
     registered_icons_use_committed_values_and_restore_the_native_slot();
@@ -6004,9 +6530,15 @@ int main(void)
     the_mode_dial_belongs_to_the_core();
     the_dial_values_survive_a_restore();
     persistence_exports_shared_values_while_a_snapshot_applies();
+    persistence_keeps_all_unloaded_id_parameters();
     persistence_exports_the_capacity_boundaries_in_user_modes();
     persistence_freezes_the_complete_file_until_release();
     persistence_ignores_unsaved_values_and_rejects_incomplete_views();
     persistence_timer_runs_in_menus_and_preserves_early_dirty_values();
+    control_mailbox_uses_the_app_timer_in_menus();
+    capture_idle_requires_both_front_and_backend_completion();
+    publication_reads_the_actual_native_controller();
+    look_publication_waits_for_durable_commit();
+    look_metadata_preserves_slots_and_capture_records();
     return 0;
 }

@@ -33,6 +33,22 @@ fn modeset_files(camera: &Camera, command: &[u8]) -> Files {
     ])
 }
 
+/// Position-independent fast-interface trampoline. SYS_memovr reads these 20
+/// bytes into `ba`, retaining the dispatcher address at ba[252]. Only firmware
+/// with a successful fast-interface probe may execute this file.
+fn owner_dispatch_stub() -> Vec<u8> {
+    [
+        0xe92d4010_u32,
+        0xe59043f0,
+        0xe3540000,
+        0x112fff34,
+        0xe8bd8010,
+    ]
+    .into_iter()
+    .flat_map(u32::to_le_bytes)
+    .collect()
+}
+
 pub fn runtime_files(binary: &[u8]) -> Files {
     runtime_files_for(binary, ICON_STRIDE)
 }
@@ -224,6 +240,7 @@ pub fn package_runtime_files_with(binaries: &[&[u8]], fast: &Files, icon_stride:
         (crate::card::STARTUP_FILE.into(), startup.into_bytes()),
         (LOADER_FILE.into(), loader_with(icon_stride, &releases)),
         (RESIDENT_FILE.into(), resident()),
+        (format!("{PACKAGE_FOLDER}/OWNER.BIN"), owner_dispatch_stub()),
         (SCAN_FILE.into(), wrapper(scan, "scan", &start)),
         (INSTALL_FILE.into(), wrapper(install, "install", "")),
     ]);

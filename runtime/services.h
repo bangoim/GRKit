@@ -345,7 +345,25 @@
    the copy of the native settings record from the start of the preview
    (GRKIT_HOST_RECIPE_PREVIEW), PREVIEW_IMAGE_BYTES bytes, which hold each
    native field of runtime/native_look.h of each build. */
-#define SERVICES_PREVIEW (SERVICES_PERSIST + GRKIT_PERSIST_SIZE)
+/* A shared command slot and an App-task-private copy. These buffers have
+   separate ownership; Linux never writes the private candidate. */
+#define SERVICES_CONTROL (SERVICES_PERSIST + GRKIT_PERSIST_SIZE)
+#define SERVICES_CONTROL_ADDRESS(base) (((base) + SERVICES_CONTROL + 63U) & ~63U)
+/* Reserve the worst-case alignment padding without moving the services base. */
+#define SERVICES_CONTROL_CANDIDATE (SERVICES_CONTROL + 60U + GRKIT_CONTROL_SIZE)
+#define SERVICES_LOOK_PUBLISH (SERVICES_CONTROL_CANDIDATE + GRKIT_CONTROL_REQUEST_SIZE)
+#define SERVICES_LOOK_PUBLISH_SIZE 320U
+#define SERVICES_LOOK_IDS (SERVICES_LOOK_PUBLISH + SERVICES_LOOK_PUBLISH_SIZE)
+#define SERVICES_LOOK_IDS_SIZE 2048U
+/* The immutable source GRF digest for each physical record, including retired
+   records. App fills an unpublished slot before making its record visible. */
+#define SERVICES_LOOK_HASHES (SERVICES_LOOK_IDS + SERVICES_LOOK_IDS_SIZE)
+#define SERVICES_LOOK_HASHES_SIZE (GRKIT_TEXT_RECORDS * 32U)
+#define SERVICES_LOOK_TELEMETRY (SERVICES_LOOK_HASHES + SERVICES_LOOK_HASHES_SIZE)
+#define SERVICES_LOOK_TELEMETRY_SIZE 6656U
+#define SERVICES_LIBRARY_OWNER (SERVICES_LOOK_TELEMETRY + SERVICES_LOOK_TELEMETRY_SIZE)
+#define SERVICES_LIBRARY_OWNER_SIZE 73728U
+#define SERVICES_PREVIEW (SERVICES_LIBRARY_OWNER + SERVICES_LIBRARY_OWNER_SIZE)
 #define PREVIEW_WORDS 0U
 #define PREVIEW_IMAGE (4U * GRKIT_RECIPE_WORDS)
 #define PREVIEW_IMAGE_BYTES 0xb40U

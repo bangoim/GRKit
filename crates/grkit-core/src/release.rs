@@ -23,9 +23,29 @@ use crate::{
 };
 
 /// The statement and the signature in a package ZIP, next to `SHA256SUMS`.
-/// No file of the card has them.
+/// Copies on the card preserve the signature for runtime capability checks.
 pub const STATEMENT_ENTRY: &str = "RELEASE.JSON";
 pub const SIGNATURE_ENTRY: &str = "RELEASE.SIG";
+pub const CARD_STATEMENT: &str = "SCRIPT/GRKIT/RELEASE.JSN";
+pub const CARD_SIGNATURE: &str = "SCRIPT/GRKIT/RELEASE.SIG";
+
+/// Card-side evidence must be an exact copy of the signed ZIP evidence.
+/// It does not itself authorize any additional executable file.
+pub(crate) fn check_card_evidence(name: &str, blob: &[u8], entries: &Files) -> Result<bool> {
+    for (card, root) in [
+        (CARD_STATEMENT, STATEMENT_ENTRY),
+        (CARD_SIGNATURE, SIGNATURE_ENTRY),
+    ] {
+        if name == format!("SD_ROOT/{card}") {
+            ensure!(
+                entries.get(root).is_some_and(|original| original == blob),
+                "Card release evidence differs from the signed package"
+            );
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 /// The version of the statement format.
 const FORMAT: u64 = 1;
 
@@ -48,6 +68,10 @@ pub struct Statement {
     /// The SHA-256 of each official module file, such as `FILMLOOK.GRM`. A
     /// package can have any of them.
     pub modules: BTreeMap<String, String>,
+    /// Trusted official GRF identity, independent of the files a user selected.
+    pub official_looks: BTreeMap<String, String>,
+    /// Data formats the signed target runtime can read. Absence proves nothing.
+    pub data_formats: BTreeMap<String, u32>,
 }
 
 impl Statement {
@@ -91,6 +115,8 @@ impl Statement {
                 .map(|(path, bytes)| (path.clone(), packaging::sha256(bytes)))
                 .collect(),
             modules: files,
+            official_looks: BTreeMap::new(),
+            data_formats: BTreeMap::from([("lookLibrary".into(), 1)]),
         })
     }
 
@@ -102,12 +128,15 @@ impl Statement {
             "camera": self.camera.id,
             "runtime": self.runtime,
             "modules": self.modules,
+            "officialLooks": self.official_looks,
+            "dataFormats": self.data_formats,
         }))
     }
 
     /// Reads a statement. It does not check the signature (`verify`).
     pub fn parse(bytes: &[u8]) -> Result<Statement> {
-        let value: Value = serde_json::from_slice(bytes).context("Read the release statement")?;
+        let value: Value =
+            crate::effects::parse_json(bytes).context("Read the release statement")?;
         ensure!(
             value["format"] == FORMAT,
             "The release statement has another format"
@@ -133,6 +162,23 @@ impl Statement {
                 })
                 .collect()
         };
+        let official_looks = hashes("officialLooks")?;
+        ensure!(
+            official_looks.len() <= 256
+                && official_looks.keys().all(|id| crate::effects::valid_id(id)),
+            "Invalid official Look identities"
+        );
+        let data_formats: BTreeMap<String, u32> =
+            serde_json::from_value(value["dataFormats"].clone())
+                .context("Read supported data formats")?;
+        ensure!(
+            data_formats.len() <= 8
+                && data_formats.iter().all(|(name, version)| matches!(
+                    name.as_str(),
+                    "lookLibrary" | "recipes" | "moduleSettings"
+                ) && *version > 0),
+            "Invalid supported data formats"
+        );
         Ok(Statement {
             version: value["version"]
                 .as_str()
@@ -145,6 +191,8 @@ impl Statement {
             )?,
             runtime: hashes("runtime")?,
             modules: hashes("modules")?,
+            official_looks,
+            data_formats,
         })
     }
 }
@@ -209,6 +257,9 @@ pub fn check_files(entries: &Files, statement: &Statement) -> Result<Update> {
         let Some(path) = name.strip_prefix("SD_ROOT/") else {
             continue;
         };
+        if check_card_evidence(name, blob, entries)? {
+            continue;
+        }
         if !path.starts_with("SCRIPT/") || path == crate::card::PACKAGE_LIST {
             continue;
         }
@@ -290,6 +341,8 @@ mod tests {
             camera: camera::find("gr3").unwrap(),
             runtime: BTreeMap::from([(card::CORE_FILE.to_owned(), "ab".repeat(32))]),
             modules: BTreeMap::new(),
+            official_looks: BTreeMap::new(),
+            data_formats: BTreeMap::new(),
         };
         let bytes = statement.to_bytes().unwrap();
         let signature = key.sign(&bytes);
@@ -302,6 +355,34 @@ mod tests {
         let mut other = bytes.clone();
         other[10] ^= 1;
         assert!(verify(&other, &signature, &[key.public_key()]).is_err());
+    }
+
+    #[test]
+    fn official_look_and_format_claims_are_bound_to_the_signature() {
+        let key = SigningKey::from_hex(SEED).unwrap();
+        let mut statement = Statement::of_release(
+            &crate::testing::release_runtimes(&camera::GR3, "1.7.0"),
+            &[],
+            &camera::GR3,
+        )
+        .unwrap();
+        statement.official_looks.insert(
+            "official".into(),
+            packaging::sha256(&crate::testing::effect("official")),
+        );
+        assert_eq!(statement.data_formats.get("lookLibrary"), Some(&1));
+        let bytes = statement.to_bytes().unwrap();
+        let signature = key.sign(&bytes);
+        let verified = verify(&bytes, &signature, &[key.public_key()]).unwrap();
+        assert_eq!(verified.data_formats["lookLibrary"], 1);
+        assert_eq!(verified.official_looks, statement.official_looks);
+        statement.data_formats.insert("lookLibrary".into(), 2);
+        assert!(verify(
+            &statement.to_bytes().unwrap(),
+            &signature,
+            &[key.public_key()]
+        )
+        .is_err());
     }
 
     /// The entries of a signed package of the tests, and its statement.

@@ -283,7 +283,7 @@ jobs:
             for target in $targets; do
               builds+=(--build "site/runtime/$target")
             done
-            signed=$(target/release/grkit sign "${builds[@]}" "${modules[@]}" --camera "$camera" \
+            signed=$(target/release/grkit sign "${builds[@]}" "${modules[@]}" --camera "$camera" --effects "$RUNNER_TEMP/effects" \
               --out "site/release/$camera")
             if [ "$(echo "$signed" | jq -r .official)" != true ]; then
               echo "::error::GRKIT_SIGNING_KEY is not the official release key."

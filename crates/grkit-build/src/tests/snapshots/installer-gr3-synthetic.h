@@ -1,7 +1,7 @@
 static const char target_marker[] __attribute__((used)) = "GRKIT_TARGET=gr3-2.10";
 static const char version_marker[] __attribute__((used)) = "GRKIT_VERSION=0.0.0";
 #define MAX_COUNT 0x28U
-#define MAX_CHUNKS 0x5U
+#define MAX_CHUNKS 0x6U
 #define ICONS_PER_CHUNK 0x28U
 #define ICON_STRIDE 0x1908U
 #define HOST_ICON_COUNT 0x15U
@@ -61,8 +61,11 @@ static const u32 patch_compare[] = {0x0,0x0};
 #define RELOCATION_REFERENCE_COUNT 0U
 static const u32 relocation_references[] = {};
 #define ARRAY_COUNT (relocated[1] + 0x0U)
+#define ARRAY_COUNT_SYMBOL 1U
 #define ARRAY_TABLE (relocated[2] + 0x0U)
+#define ARRAY_TABLE_SYMBOL 2U
 #define HEAP_MIN (relocated[3] + 0x0U)
+#define HEAP_MIN_SYMBOL 3U
 #define ENGLISH_SLOT (relocated[4] + 0x4U)
 #define STOCK_RECORD (relocated[5] + 0x0U)
 #define SETTINGS_DOMAIN (relocated[6] + 0x0U)
@@ -112,7 +115,7 @@ static const char rtos_cameras[] = "GR III\0GR III\0GR IIIx\0GR IIIx";
 #define PARAMETER_VALUE_MAX 387420488U
 #define TONING_KEY_BASE 990032768U
 #define RECIPE_VALUE_MAX 536870911U
-#define STATE_TEXT_MAX 16384U
+#define STATE_TEXT_MAX 32768U
 #define GRKIT_VERSION "0.0.0"
 #define MODULES_PATH "/media/storage1/GRKIT/MODULES"
 #define PACKAGE_MODULES_PATH "/media/storage1/SCRIPT/GRKIT/MODULES"
@@ -124,6 +127,7 @@ static const char *const core_setting_names[] = { /* 12 values, SHA-256 9114df82
 static const u32 core_setting_points[] = {0x12,0xc,0x20,0x40,0xc,0x0,0x0,0x84,0x84,0x210,0x210,0x0};
 #define RTOS_EXECUTABLE_END 0x55000000U
 #define CORE_VIEWFINDER 0x0U
+#define CORE_LIBRARY_OWNER 0x0U
 #define CORE_EXPORT_COUNT 0U
 static const u32 core_exports[] = {};
 static const u8 stock_record[] __attribute__((aligned(4))) = { /* 84 values, SHA-256 d1c1719f675e9a47d0e29a12b89645cbca01118d5b0fd6199887c85748f5e795 */ };

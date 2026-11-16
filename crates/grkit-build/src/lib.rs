@@ -74,6 +74,8 @@ pub struct PatchPlan {
     /// shooting screen (`runtime/menu.c`: `menu_viewfinder`), which INSTALL
     /// writes into the services block, as the components link apart.
     pub viewfinder: u32,
+    /// Resident Script-task storage dispatcher in the menu component.
+    pub library_owner: u32,
 }
 impl PatchPlan {
     /// The aligned span of the core payloads. Modules start immediately after it.
@@ -405,12 +407,14 @@ fn build_image_with(
         .collect();
     let exports = core_exports(image.target.layout, &components)?;
     let viewfinder = core_symbol(image.target.layout, &components, "menu_viewfinder")?;
+    let library_owner = core_symbol(image.target.layout, &components, "menu_library_owner")?;
     let plan = PatchPlan {
         patches,
         relocations,
         references,
         exports,
         viewfinder,
+        library_owner,
     };
     validate_plan(&plan)?;
     let core_size = plan.core_size(image.target.layout.tail)?;

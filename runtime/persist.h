@@ -14,9 +14,11 @@ static u32 persist_core_value(volatile u32 *h,u32 k);
 static u32 persist_fn_value(volatile u32 *h,u32 record,u32 i);
 static u32 persist_toning_value(volatile u32 *h,u32 record,u32 i);
 static u32 persist_module_value(volatile u32 *h,volatile u32 *t,u32 i);
+#define PERSIST_WORD(p,o) MANAGE_MAP((p)+(o))[0]
 #define PERSIST_HALF(p,o) HALF(p,o)
 #define PERSIST_BYTE(p,o) BYTE(p,o)
 #define PERSIST_SETTINGS(h) settings_table(h)
+#define PERSIST_ID_BYTE(h,row,i) (((volatile u8 *)services_word(h,SERVICES_LOOK_IDS))[(row)*32U+(i)])
 #define PERSIST_CORE_VALUE(h,k) persist_core_value(h,k)
 #define PERSIST_FN_VALUE(h,r,i) persist_fn_value(h,r,i)
 #define PERSIST_TONING_VALUE(h,r,i) persist_toning_value(h,r,i)
@@ -65,6 +67,7 @@ static void persist_poll(volatile u32 *h) {
 static void persist_ready(volatile u32 *h) {
     volatile u32 *timer=services_word(h,SERVICES_PERSIST_TIMER);
     if(!h[GRKIT_HOST_PERSIST_WORD/4] || timer[0]) return;
+    control_poll(h);
     persist_poll(h);
     timer[0]=PERSIST_TIMER_START(PERSIST_POLL_MS);
 }

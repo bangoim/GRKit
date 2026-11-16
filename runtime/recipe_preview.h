@@ -1,5 +1,6 @@
 #ifndef GRKIT_RECIPE_PREVIEW_H
 #define GRKIT_RECIPE_PREVIEW_H
+#include "look_guard.h"
 /* The ADJ preview of a recipe (runtime/recipes.h): while the cursor of the
    Recipes page is on a recipe that can apply, the live view shows it, as
    the native ADJ shows a highlighted Image Control. A move of the cursor
@@ -79,6 +80,7 @@ static u32 recipe_preview_shows(volatile u32 *h,u32 e) {
    cannot apply. Showing the recipe that shows changes nothing besides the
    look, which another page may have cleared. */
 static void recipe_preview_show(volatile u32 *h,u32 e) {
+    if(!GRKIT_LOOK_MUTATION_ALLOWED(h)) return;
     u32 to[GRKIT_RECIPE_WORDS], from[GRKIT_RECIPE_WORDS], on, want, i, live, image;
     if(!h[GRKIT_HOST_SERVICES/4]) return;
     on=recipe_preview_on(h);

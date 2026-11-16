@@ -7,7 +7,7 @@
 /* The private header: the start of the registry array. ARM code addresses it
    through the literal GRKIT_HEADER_REFERENCE, which the installer relocates. */
 #define GRKIT_HEADER_REFERENCE 0x58012340
-#define GRKIT_HOST_HEADER_SIZE 6540
+#define GRKIT_HOST_HEADER_SIZE 6560
 /* The most module pages, layers, and plane filters that the header holds. */
 #define GRKIT_MODULE_PAGES_MAX 16
 #define GRKIT_MODULE_LAYERS_MAX 16
@@ -184,7 +184,7 @@
 #define GRKIT_STATE_CHANGED(h) (++(h)[GRKIT_HOST_STATE_CHANGES/4])
 #define GRKIT_RECIPES_CHANGED(h) (++(h)[GRKIT_HOST_RECIPE_CHANGES/4])
 #define GRKIT_HOST_MAGIC_VALUE 0x314d5247
-#define GRKIT_HOST_VERSION_VALUE 1
+#define GRKIT_HOST_VERSION_VALUE 2
 #define GRKIT_UPDATE_WAITING 1U
 #define GRKIT_UPDATE_CONFIRMED 2U
 #define GRKIT_UPDATE_READY 3U
@@ -273,313 +273,320 @@
 /* Icon chunk addresses: chunk n holds icon slots 40 n to 40 n + 39. The host
    icons come first in chunk 0, then the effect icons. */
 #define GRKIT_HOST_ICON_CHUNKS 156
-#define GRKIT_HOST_ICON_CHUNKS_WORDS 5
+#define GRKIT_HOST_ICON_CHUNKS_WORDS 6
 /* Icon of the GRKit tile. */
-#define GRKIT_HOST_GRKIT_ICON 176
+#define GRKIT_HOST_GRKIT_ICON 180
 /* Private toolbar cell, or 0. */
-#define GRKIT_HOST_TOOLBAR_WIDGET 180
+#define GRKIT_HOST_TOOLBAR_WIDGET 184
 /* ADJ controller of the private toolbar cell. */
-#define GRKIT_HOST_TOOLBAR_OWNER 184
+#define GRKIT_HOST_TOOLBAR_OWNER 188
 /* Module that the private menu shows at MENU_MODULE. At the end of a private
    session it holds the module of the root row where the next session opens
    (menu_reopen). */
-#define GRKIT_HOST_MODULE 188
+#define GRKIT_HOST_MODULE 192
 /* Load cue: 0 none, 1 after INSTALL, then 2 + the local second of the day when
    the still live view first shows the cue. */
-#define GRKIT_HOST_LOAD_CUE 192
+#define GRKIT_HOST_LOAD_CUE 196
 /* Aspect id 2 variant for the photo shown in playback: 0 none (shooting uses
    the Framing ratio), 1 not 65:24, 2 65:24. */
-#define GRKIT_HOST_FRAME_FILE 196
+#define GRKIT_HOST_FRAME_FILE 200
 /* Record of the last live-view build: an owned record, or 0 for native
    processing. */
-#define GRKIT_HOST_LIVE_RECORD 200
+#define GRKIT_HOST_LIVE_RECORD 204
 /* The capabilities in use: bit n is set when a loaded module uses capability n
    (GRKIT_CORE_SETTING_BASE + n). INSTALL writes it, and the resident loader
    restores only the values of these capabilities. */
-#define GRKIT_HOST_CAPABILITIES 204
+#define GRKIT_HOST_CAPABILITIES 208
 /* Framing ratio: 0 native, then the Framing rows. */
-#define GRKIT_HOST_FRAME_RATIO 208
+#define GRKIT_HOST_FRAME_RATIO 212
 /* ADJ page preview: the highlighted ratio + 1 in the low byte, 0 none, and 1 +
    the slot of the recipe whose settings ADJ shows in the next byte
    (runtime/services.h: FRAME_PREVIEW_PANEL). */
-#define GRKIT_HOST_FRAME_PREVIEW 212
+#define GRKIT_HOST_FRAME_PREVIEW 216
 /* Number of Framing paints. A diagnostic. */
-#define GRKIT_HOST_FRAME_DRAWS 216
+#define GRKIT_HOST_FRAME_DRAWS 220
 /* ADJ controller of the preview. Its canvas shows the preview. ADJ can make
    its canvas after its first refresh, so a draw reads the canvas from the
    controller. The word stays set until a full draw erases the mask. */
-#define GRKIT_HOST_FRAME_PREVIEW_ADJ 220
+#define GRKIT_HOST_FRAME_PREVIEW_ADJ 224
 /* Address of the effect list of the Effects page (runtime/effects.h), or 0
    without a listed effect. INSTALL writes it. */
-#define GRKIT_HOST_EFFECTS 224
+#define GRKIT_HOST_EFFECTS 228
 /* Live view controller that Framing draws on, or 0. */
-#define GRKIT_HOST_FRAME_OWNER 228
+#define GRKIT_HOST_FRAME_OWNER 232
 /* Canvas of that controller. */
-#define GRKIT_HOST_FRAME_CANVAS 232
+#define GRKIT_HOST_FRAME_CANVAS 236
 /* Bitmap of the last Framing paint, or 0 when nothing is drawn. */
-#define GRKIT_HOST_FRAME_BITMAP 236
+#define GRKIT_HOST_FRAME_BITMAP 240
 /* Grain size, the capability CORE.GRAIN_SIZE: 0 Auto (the ISO of the shot), 1
    small, 2 medium, 3 large. */
-#define GRKIT_HOST_GRAIN_SIZE 240
+#define GRKIT_HOST_GRAIN_SIZE 244
 /* Live-view-only override: 0 none, 1 native processing, else an owned record. */
-#define GRKIT_HOST_PREVIEW 244
+#define GRKIT_HOST_PREVIEW 248
 /* The grain of the shot whose grain stage was set up last: 0 the native noise,
    else the size 1 small, 2 medium, 3 large. The GR III noise fill reads it
    (runtime/picture.c). */
-#define GRKIT_HOST_GRAIN_SHOT 248
+#define GRKIT_HOST_GRAIN_SHOT 252
 /* Return to GRKit Image Control after the native parameter page: 1 opening, 2
    away. 3: ADJ exited from GRKit, so the next ADJ opens GRKit. 4: MENU or OK
    on GRKit passed the event that closes ADJ to the native list. 5: INSTALL
    restored CORE.ADJ = 1, so the next ADJ that opens after INSTALL opens GRKit
    (runtime/menu.c). */
-#define GRKIT_HOST_RETURN 252
+#define GRKIT_HOST_RETURN 256
 /* CORE.ADJ: 1 when the next ADJ should open on GRKit, 0 for a native entry.
    Survives enter clearing HOST_RETURN, and STATE.TXT keeps it across power-off
    (runtime/menu.c). */
-#define GRKIT_HOST_ADJ_OPEN 256
+#define GRKIT_HOST_ADJ_OPEN 260
 /* Number of changes of the saved selections: the effect, CORE.ASPECT,
    CORE.GRAIN, CORE.GRAIN_SIZE, CORE.ADJ, CORE.ADJ_MODULE, the Fn adjustments,
    and the module settings (GRKIT_STATE_CHANGED). This also counts temporary
    user-mode changes. The normal resident path uses the persistence export
    revision instead; only module-free installs poll it. */
-#define GRKIT_HOST_STATE_CHANGES 260
+#define GRKIT_HOST_STATE_CHANGES 264
 /* Number of module plane filters in GRKIT_HOST_MODULE_FILTERS. INSTALL writes
    it. */
-#define GRKIT_HOST_MODULE_FILTER_COUNT 264
+#define GRKIT_HOST_MODULE_FILTER_COUNT 268
 /* Address of the profile table (GRKIT_PROFILE in the tail) while the
    development profile runs, else 0. INSTALL writes it when the card has
    GRKIT/PROFILE or PROFILE.TXT. */
-#define GRKIT_HOST_PROFILE 268
+#define GRKIT_HOST_PROFILE 272
 /* Two words for each module plane filter, in stage order: its apply function,
    and its setting handle in the low half with its stage in the high half. */
-#define GRKIT_HOST_MODULE_FILTERS 272
+#define GRKIT_HOST_MODULE_FILTERS 276
 #define GRKIT_HOST_MODULE_FILTERS_WORDS 16
 /* The crop of the capture size hooks (runtime/framing.S): the Framing ratio
    where it applies in the native aspect (aspect_value), else 0. Each live-view
    update sets it, so a native aspect that the camera menu sets takes the stock
    sizes. */
-#define GRKIT_HOST_FRAME_CROP 336
+#define GRKIT_HOST_FRAME_CROP 340
 /* The listed modules that ADJ can show, a bit each, which ADJ Order lists
    (runtime/manage.h). The menu sets it. The text hooks read this word, so they
    do not walk the module pages. */
-#define GRKIT_HOST_ADJ_MODULES 340
+#define GRKIT_HOST_ADJ_MODULES 344
 /* Address of the module settings table, or 0 (runtime/settings.h). INSTALL
    writes it. */
-#define GRKIT_HOST_MODULE_SETTINGS 344
+#define GRKIT_HOST_MODULE_SETTINGS 348
 /* The ADJ preview of a module page: its setting handle plus 1 (0 for none),
    then the highlighted value. Module layers of that setting paint the
    highlighted value on the ADJ canvas. */
-#define GRKIT_HOST_MODULE_PREVIEW 348
+#define GRKIT_HOST_MODULE_PREVIEW 352
 #define GRKIT_HOST_MODULE_PREVIEW_WORDS 2
 /* Number of module pages in GRKIT_HOST_MODULE_PAGES. INSTALL writes it. */
-#define GRKIT_HOST_MODULE_PAGE_COUNT 356
+#define GRKIT_HOST_MODULE_PAGE_COUNT 360
 /* Three words for each module page (runtime/sdk/grkit.h), in load order: the
    address of its GrkitPage, its setting handle, and the global index of its
    tile 0 (GRKIT_ICON_MODULE_TILE). */
-#define GRKIT_HOST_MODULE_PAGES 360
+#define GRKIT_HOST_MODULE_PAGES 364
 #define GRKIT_HOST_MODULE_PAGES_WORDS 48
 /* The module page that the generic page callbacks of the menu serve. */
-#define GRKIT_HOST_MODULE_CHOICE 552
+#define GRKIT_HOST_MODULE_CHOICE 556
 /* Number of module layers in GRKIT_HOST_MODULE_LAYERS. INSTALL writes it. */
-#define GRKIT_HOST_MODULE_LAYER_COUNT 556
+#define GRKIT_HOST_MODULE_LAYER_COUNT 560
 /* Four words for each module layer, in painting order: its paint function,
    setting handle (GRKIT_NO_SETTING paints with value 1), flags in the low half
    with order in the high half, and an optional GrkitLayer descriptor with
    enabled conditions (0 for no conditions). */
-#define GRKIT_HOST_MODULE_LAYERS 560
+#define GRKIT_HOST_MODULE_LAYERS 564
 #define GRKIT_HOST_MODULE_LAYERS_WORDS 64
 /* Key of the inputs of the last private curve composition in the gamma stage,
    or 0 (runtime/processing.h). */
-#define GRKIT_HOST_GAMMA_KEY 816
+#define GRKIT_HOST_GAMMA_KEY 820
 /* The effect of the RAW development in playback: 1 for native processing, else
    an owned record. The start of a development sets the effect that its DNG
    records (runtime/picture.c), and its Image Control list changes it. The
    still builds of a development apply it instead of the selected effect
    (runtime/processing.h). */
-#define GRKIT_HOST_DEVELOP 820
+#define GRKIT_HOST_DEVELOP 824
 /* GRKIT_HOST_DEVELOP when the Image Control list of the development opened.
    Cancel restores it, as the list restores its native value. */
-#define GRKIT_HOST_DEVELOP_SAVED 824
+#define GRKIT_HOST_DEVELOP_SAVED 828
 /* The native rows of that list. The effects follow them (runtime/menu.c). */
-#define GRKIT_HOST_DEVELOP_ROWS 828
+#define GRKIT_HOST_DEVELOP_ROWS 832
 /* The text ID of the native Standard label of the development, which shows the
    name of a GRKit effect (GRKIT_HOST_DEVELOP_NAME) instead. */
-#define GRKIT_HOST_DEVELOP_TEXT 832
+#define GRKIT_HOST_DEVELOP_TEXT 836
 /* The text descriptor of that name. */
-#define GRKIT_HOST_DEVELOP_NAME 836
+#define GRKIT_HOST_DEVELOP_NAME 840
 #define GRKIT_HOST_DEVELOP_NAME_WORDS 2
 /* Number of registered viewfinder indicators. INSTALL writes it. */
-#define GRKIT_HOST_INDICATOR_COUNT 844
+#define GRKIT_HOST_INDICATOR_COUNT 848
 /* Descriptor address and module tile base for each indicator, in module load
    order and declaration order (runtime/sdk/grkit.h). */
-#define GRKIT_HOST_INDICATORS 848
+#define GRKIT_HOST_INDICATORS 852
 #define GRKIT_HOST_INDICATORS_WORDS 32
 /* Code address of an ABI 2.0/2.1 module that supplies CORE.TONE, or 0. Its
    legacy native icon applies only without an explicit slot owner. */
-#define GRKIT_HOST_LEGACY_TONE_OWNER 976
+#define GRKIT_HOST_LEGACY_TONE_OWNER 980
 /* CORE.ASPECT_MODE: 0 crops photos, 1 draws a composition frame only. */
-#define GRKIT_HOST_ASPECT_MODE 980
+#define GRKIT_HOST_ASPECT_MODE 984
 /* Native aspect + 1 at the last live-view bind, or 0 before the first bind. */
-#define GRKIT_HOST_FRAME_NATIVE 984
+#define GRKIT_HOST_FRAME_NATIVE 988
 /* The Framing ratio of the RAW development in playback (a CORE.ASPECT value),
    or 0 for its native aspect. The start of a development clears it
    (runtime/picture.c), and the aspect list of the development sets it
    (runtime/menu.c). The development sends the capture aspect and the geometry
    of that ratio to the pipeline (runtime/framing.c). */
-#define GRKIT_HOST_DEVELOP_RATIO 988
+#define GRKIT_HOST_DEVELOP_RATIO 992
 /* GRKIT_HOST_DEVELOP_RATIO when the aspect list of the development opened.
    Cancel restores it, as the list restores its native value. */
-#define GRKIT_HOST_DEVELOP_RATIO_SAVED 992
+#define GRKIT_HOST_DEVELOP_RATIO_SAVED 996
 /* The native rows of that list. The Framing ratios follow them. */
-#define GRKIT_HOST_DEVELOP_ASPECT_ROWS 996
+#define GRKIT_HOST_DEVELOP_ASPECT_ROWS 1000
 /* The text ID of the native aspect label that shows the name of the Framing
    ratio (GRKIT_HOST_DEVELOP_RATIO_NAME) instead. */
-#define GRKIT_HOST_DEVELOP_RATIO_TEXT 1000
+#define GRKIT_HOST_DEVELOP_RATIO_TEXT 1004
 /* The text descriptor of that name. */
-#define GRKIT_HOST_DEVELOP_RATIO_NAME 1004
+#define GRKIT_HOST_DEVELOP_RATIO_NAME 1008
 #define GRKIT_HOST_DEVELOP_RATIO_NAME_WORDS 2
 /* The effect record whose Fn adjustments the Standard parameter set of the
    development model holds, or 0 while the set holds its own values
    (runtime/develop.h). */
-#define GRKIT_HOST_DEVELOP_FILLED 1012
+#define GRKIT_HOST_DEVELOP_FILLED 1016
 /* The own values of that set while GRKIT_HOST_DEVELOP_FILLED is not 0: one
    byte for each Fn adjustment, in GRKIT_RECORD_PARAMETERS order. */
-#define GRKIT_HOST_DEVELOP_NATIVE 1016
+#define GRKIT_HOST_DEVELOP_NATIVE 1020
 #define GRKIT_HOST_DEVELOP_NATIVE_WORDS 3
 /* The effect record whose changed adjustments the development keeps while the
    set holds another one, or 0. The start of a development clears it. */
-#define GRKIT_HOST_DEVELOP_CHANGED 1028
+#define GRKIT_HOST_DEVELOP_CHANGED 1032
 /* Those adjustments, as GRKIT_HOST_DEVELOP_NATIVE. */
-#define GRKIT_HOST_DEVELOP_CHANGES 1032
+#define GRKIT_HOST_DEVELOP_CHANGES 1036
 #define GRKIT_HOST_DEVELOP_CHANGES_WORDS 3
 /* The native Image Control type plus 1 when ADJ last opened, or 0 when it was
    not readable. A half-press on the native Image Control slot with another
    type selects that type, as OK does (runtime/menu.c). */
-#define GRKIT_HOST_ADJ_IC_TYPE 1044
+#define GRKIT_HOST_ADJ_IC_TYPE 1048
 /* CORE.CROP: 0 Off, then a focal-length crop step (runtime/crop.h). */
-#define GRKIT_HOST_CROP 1048
+#define GRKIT_HOST_CROP 1052
 /* CORE.CROP_MODE: 0 crops photos, 1 draws the frame only. */
-#define GRKIT_HOST_CROP_MODE 1052
+#define GRKIT_HOST_CROP_MODE 1056
 /* The native crop factor that the core set for CORE.CROP, as float bits, or 0
    while the camera keeps its own (runtime/crop.h). */
-#define GRKIT_HOST_CROP_NATIVE 1056
+#define GRKIT_HOST_CROP_NATIVE 1060
 /* The crop factor of the next shot, as float bits, where it is longer than the
    native factor of the camera (40 and 70 mm), or 0. */
-#define GRKIT_HOST_CROP_SHOT 1060
+#define GRKIT_HOST_CROP_SHOT 1064
 /* The crop factor that the live view shows in place of the camera's, as float
    bits, or 0 for the camera's own (runtime/framing.S: crop_live). */
-#define GRKIT_HOST_CROP_LIVE 1064
+#define GRKIT_HOST_CROP_LIVE 1068
 /* The zoom of GRKIT_HOST_CROP_LIVE (the factor times 8192), or 0, and the zoom
    of the camera's crop factor that the core set: the live-view window takes
    the first in place of the second (runtime/framing.S: crop_window). */
-#define GRKIT_HOST_CROP_LIVE_ZOOM 1068
-#define GRKIT_HOST_CROP_CAMERA_ZOOM 1072
+#define GRKIT_HOST_CROP_LIVE_ZOOM 1072
+#define GRKIT_HOST_CROP_CAMERA_ZOOM 1076
 /* The zoom of the last live-view window of a crop (the factor times 8192), or
    0 before one (runtime/framing.S: crop_window). */
-#define GRKIT_HOST_CROP_LIVE_SEEN 1076
+#define GRKIT_HOST_CROP_LIVE_SEEN 1080
 /* The tries to make the live view read its factor again: the count in the high
    byte, and the second of the last try plus 1 below it (runtime/crop.h:
    crop_live_retry). */
-#define GRKIT_HOST_CROP_LIVE_RETRY 1080
+#define GRKIT_HOST_CROP_LIVE_RETRY 1084
 /* GR IV: the back end of the last shot, whose queue completion the core can
    post when a crop shot finishes before the shutter release stops
    (runtime/crop_queue.S). */
-#define GRKIT_HOST_CROP_QUEUE_OWNER 1084
+#define GRKIT_HOST_CROP_QUEUE_OWNER 1088
 /* GR IV: the queue completion flags of that shot, CROP_QUEUE_POSTED and
    CROP_QUEUE_RECOVERED. */
-#define GRKIT_HOST_CROP_QUEUE_FLAGS 1088
+#define GRKIT_HOST_CROP_QUEUE_FLAGS 1092
 /* CORE.BORDER: 0 Off, 1 Thin, 2 Wide, 3 Instant (runtime/canvas.h). */
-#define GRKIT_HOST_BORDER 1092
+#define GRKIT_HOST_BORDER 1096
 /* CORE.BORDER_COLOR: 0 white, 1 black. */
-#define GRKIT_HOST_BORDER_COLOR 1096
+#define GRKIT_HOST_BORDER_COLOR 1100
 /* The recipes (runtime/recipes.h): RECIPE_WORDS words for each of the
    RECIPE_SLOTS recipes. A recipe whose word 0 is 0 is empty. The resident
    loader saves each word that is not 0 in the recipe file
    (`capabilities::StateFile::Recipes`). */
-#define GRKIT_HOST_RECIPES 1100
+#define GRKIT_HOST_RECIPES 1104
 #define GRKIT_HOST_RECIPES_WORDS 384
 /* The names of the recipes, RECIPE_NAME_WORDS words each (RECIPE_NAME_CHARS),
    right after HOST_RECIPES, which the loader saves after the recipe words. */
-#define GRKIT_HOST_RECIPE_NAMES 2636
+#define GRKIT_HOST_RECIPE_NAMES 2640
 #define GRKIT_HOST_RECIPE_NAMES_WORDS 256
 /* The hash of the recipe library of the package that INSTALL imported last
    (runtime/install_recipes.h), after the names: the loader saves it with the
    recipes, so a package imports once. */
-#define GRKIT_HOST_RECIPE_IMPORTED 3660
+#define GRKIT_HOST_RECIPE_IMPORTED 3664
 /* The ID of each recipe, by slot, 1 to `runtime::RECIPE_ID_MAX`: a generated
    number, so that a recipe that the site moves to another card keeps an ID
    that no recipe of that card had. A reference to a recipe holds its ID, so
    that it stays valid when the recipes move. Each part that creates a recipe
    (the camera, INSTALL, the site) generates its ID. The loader saves the IDs
    after the import hash. */
-#define GRKIT_HOST_RECIPE_IDS 3664
+#define GRKIT_HOST_RECIPE_IDS 3668
 #define GRKIT_HOST_RECIPE_IDS_WORDS 64
 /* The count of changes of the recipes: the loader saves the recipe file after
    it changes (GRKIT_RECIPES_CHANGED). INSTALL sets 1 after an import. */
-#define GRKIT_HOST_RECIPE_CHANGES 3920
+#define GRKIT_HOST_RECIPE_CHANGES 3924
 /* The undo steps, the oldest first, RECIPE_WORDS words each. They are not
    saved: a start begins without them. */
-#define GRKIT_HOST_RECIPE_UNDO 3924
+#define GRKIT_HOST_RECIPE_UNDO 3928
 #define GRKIT_HOST_RECIPE_UNDO_WORDS 30
 /* Nonzero while a user-mode snapshot holds temporary settings. The persistence
    export reads dial-owned values from the shared copy. */
-#define GRKIT_HOST_STATE_HOLD 4044
+#define GRKIT_HOST_STATE_HOLD 4048
 /* The count of changes of the settings of the user modes (`HOST_DIAL_SETS` to
    `HOST_MANAGE_COPY`): the loader saves their file after it changes. */
-#define GRKIT_HOST_DIAL_SET_CHANGES 4048
+#define GRKIT_HOST_DIAL_SET_CHANGES 4052
 /* The snapshot of each user mode of the mode dial, U1 to U3, `DIAL_SET_WORDS`
    words each (runtime/mode_dial.h). The resident loader saves each word that
    is not 0 in their file (`capabilities::StateFile::DialSets`), and INSTALL
    restores them. */
-#define GRKIT_HOST_DIAL_SETS 4052
+#define GRKIT_HOST_DIAL_SETS 4056
 #define GRKIT_HOST_DIAL_SETS_WORDS 603
 /* What each user mode, U1 to U3, does, `DIAL_SLOT_WORDS` words each
    (runtime/mode_dial.h), right after HOST_DIAL_SETS: the loader saves them in
    the file of the sets after the sets, and INSTALL restores them. Only the
    camera writes them. */
-#define GRKIT_HOST_DIAL_SLOTS 6464
+#define GRKIT_HOST_DIAL_SLOTS 6468
 #define GRKIT_HOST_DIAL_SLOTS_WORDS 6
 /* The positions that share their settings, P, Av, Tv, and M (and Sn on GR IV),
    where GRKit is off: bit c for the position with code c, right after
    HOST_DIAL_SLOTS, in the same file (runtime/mode_dial.h). Bit 0, which no
    position has, is the older value for each of them off. */
-#define GRKIT_HOST_DIAL_SHARED_OFF 6488
+#define GRKIT_HOST_DIAL_SHARED_OFF 6492
 /* The copy of the switch, Enable at Start, and Distance Unit,
    `MANAGE_COPY_WORDS` words (runtime/manage.h), right after
    HOST_DIAL_SHARED_OFF, in the same file. INSTALL takes them from the copy
    before the main state file, and writes the values of the start here. */
-#define GRKIT_HOST_MANAGE_COPY 6492
+#define GRKIT_HOST_MANAGE_COPY 6496
 #define GRKIT_HOST_MANAGE_COPY_WORDS 3
 /* Word index of the PERSIST buffer within modulecode, not a native address. */
-#define GRKIT_HOST_PERSIST_WORD 6504
+#define GRKIT_HOST_PERSIST_WORD 6508
+/* Word index of the CONTROL mailbox within modulecode, not a native address. */
+#define GRKIT_HOST_CONTROL_WORD 6512
 /* The record of the ADJ preview of a recipe whose Fn adjustments the live view
    takes from GRKIT_HOST_PREVIEW_FN_BYTES, not from the record, while
    GRKIT_HOST_PREVIEW is that record; else 0 (runtime/recipe_preview.h,
    runtime/processing.h). */
-#define GRKIT_HOST_PREVIEW_FN 6508
+#define GRKIT_HOST_PREVIEW_FN 6516
 /* Those adjustments: one stored byte each, in the order of RECORD_PARAMETERS.
    It follows GRKIT_HOST_PREVIEW_FN. */
-#define GRKIT_HOST_PREVIEW_FN_BYTES 6512
+#define GRKIT_HOST_PREVIEW_FN_BYTES 6520
 #define GRKIT_HOST_PREVIEW_FN_BYTES_WORDS 3
 /* The copy of the native settings record from the start of the ADJ preview of
    a recipe, in the services block, or 0 while no preview writes native
    settings. A capture of the current settings reads the native settings from
    it (runtime/recipes.h). */
-#define GRKIT_HOST_RECIPE_PREVIEW 6524
+#define GRKIT_HOST_RECIPE_PREVIEW 6532
 /* An update over Wi-Fi (grkit_core::runtime::update): UPDATE_WAITING while its
    journal waits for the confirmation on the camera, which the resident loader
    sets; UPDATE_CONFIRMED after the confirmation in GRKit Settings
    (runtime/menu_settings.h); UPDATE_READY after the resident loader made the
    journal run at the next power-on; else 0. */
-#define GRKIT_HOST_UPDATE 6528
+#define GRKIT_HOST_UPDATE 6536
 /* The version of that update, from `card::VERSION_FILE`: major << 16, minor <<
    8, and patch, or 0 when the package does not name it. */
-#define GRKIT_HOST_UPDATE_VERSION 6532
+#define GRKIT_HOST_UPDATE_VERSION 6540
 /* The text of the load cue (GRKIT_HOST_LOAD_CUE): 0 for GRKit Loaded,
    CUE_UPDATE_READY while an update over Wi-Fi waits, or CUE_UPDATED at the
    first start after one installed. The cue sets it back to 0 when it ends
    (runtime/viewfinder.h). */
-#define GRKIT_HOST_CUE_LABEL 6536
+#define GRKIT_HOST_CUE_LABEL 6544
+/* The second fixed record bank, allocated separately from the registry. */
+#define GRKIT_HOST_RECORD_BANK2 6548
+/* One bit per logical record: 0 selects the registry bank, 1 bank 2. */
+#define GRKIT_HOST_RECORD_BANK_BITS 6552
+#define GRKIT_HOST_RECORD_BANK_BITS_WORDS 2
 /* Consumer request ticket, 1..2147483647. Zero means no request. */
 #define GRKIT_PERSIST_REQUEST 0
 /* Producer publishes this ticket after all payload stores are visible. */
@@ -593,18 +600,81 @@
 #define GRKIT_PERSIST_CORE 16
 #define GRKIT_PERSIST_CORE_WORDS 11
 #define GRKIT_PERSIST_EFFECT_COUNT 60
-/* Each effect: low 15 bits of code, base-9 Fn adjustments, Toning. */
+/* Each effect: ID hash15, Fn, Toning, and eight packed 7-bit ID words. */
 #define GRKIT_PERSIST_EFFECTS 64
-#define GRKIT_PERSIST_EFFECTS_WORDS 120
-#define GRKIT_PERSIST_MODULE_COUNT 544
+#define GRKIT_PERSIST_EFFECTS_WORDS 704
+#define GRKIT_PERSIST_MODULE_COUNT 2880
 /* Each module setting: state ID, value. Zero values must persist too. */
-#define GRKIT_PERSIST_MODULES 548
+#define GRKIT_PERSIST_MODULES 2884
 #define GRKIT_PERSIST_MODULES_WORDS 320
+#define GRKIT_CONTROL_MAGIC 0
+#define GRKIT_CONTROL_VERSION 4
+#define GRKIT_CONTROL_CAPACITY 8
+#define GRKIT_CONTROL_EPOCH 12
+#define GRKIT_CONTROL_EPOCH_WORDS 4
+#define GRKIT_CONTROL_OWNER_ENTRY 28
+#define GRKIT_CONTROL_OWNER_STATE 32
+#define GRKIT_CONTROL_OWNER_POLL 36
+#define GRKIT_CONTROL_DESCRIPTOR_PADDING 40
+#define GRKIT_CONTROL_DESCRIPTOR_PADDING_WORDS 6
+#define GRKIT_CONTROL_REQUEST 64
+#define GRKIT_CONTROL_RELEASE 68
+#define GRKIT_CONTROL_CANCEL 72
+#define GRKIT_CONTROL_REQUEST_EPOCH 76
+#define GRKIT_CONTROL_REQUEST_EPOCH_WORDS 4
+#define GRKIT_CONTROL_COMMAND 92
+#define GRKIT_CONTROL_EXPECTED_GENERATION 96
+#define GRKIT_CONTROL_LENGTH 100
+#define GRKIT_CONTROL_CHECKSUM 104
+#define GRKIT_CONTROL_PRODUCER_PADDING 108
+#define GRKIT_CONTROL_PRODUCER_PADDING_WORDS 5
+#define GRKIT_CONTROL_CLAIMED 128
+#define GRKIT_CONTROL_READY 132
+#define GRKIT_CONTROL_RESULT 136
+#define GRKIT_CONTROL_GENERATION 140
+#define GRKIT_CONTROL_RESPONSE_LENGTH 144
+#define GRKIT_CONTROL_RESPONSE_CHECKSUM 148
+#define GRKIT_CONTROL_CONSUMER_PADDING 152
+#define GRKIT_CONTROL_CONSUMER_PADDING_WORDS 10
+#define GRKIT_CONTROL_PAYLOAD 192
+#define GRKIT_CONTROL_PAYLOAD_WORDS 2176
+#define GRKIT_CONTROL_RESPONSE 8896
+#define GRKIT_CONTROL_RESPONSE_WORDS 2176
 #define GRKIT_PERSIST_CORE_COUNT 11U
-#define GRKIT_PERSIST_EFFECT_WORDS 3U
+#define GRKIT_PERSIST_EFFECT_WORDS 11U
+#define GRKIT_PERSIST_EFFECT_CAPACITY 64U
+#define GRKIT_LOOK_PARAMETER_KEY_BASE 991000000U
+#define GRKIT_LOOK_TONING_KEY_BASE 991032768U
+#define GRKIT_LOOK_ID_KEY_BASE 991065536U
 #define GRKIT_PERSIST_MODULE_WORDS 2U
-#define GRKIT_PERSIST_SIZE 1828U
-#define GRKIT_PERSIST_WORDS 457U
+#define GRKIT_PERSIST_SIZE 4164U
+#define GRKIT_PERSIST_WORDS 1041U
+#define GRKIT_CONTROL_SIZE 17600U
+#define GRKIT_CONTROL_WORDS 4400U
+#define GRKIT_CONTROL_PAYLOAD_BYTES 8704U
+#define GRKIT_CONTROL_REQUEST_SIZE 8720U
+#define GRKIT_CONTROL_MAGIC_VALUE 1196573489U
+#define GRKIT_CONTROL_VERSION_VALUE 3U
+#define GRKIT_CONTROL_SEQUENCE_MAX 2147483647U
+#define GRKIT_CONTROL_EMPTY 0U
+#define GRKIT_CONTROL_ACCEPTED 1U
+#define GRKIT_CONTROL_BAD_CONTEXT 16U
+#define GRKIT_CONTROL_BAD_LENGTH 17U
+#define GRKIT_CONTROL_BAD_DIGEST 18U
+#define GRKIT_CONTROL_CHANGED 19U
+#define GRKIT_CONTROL_UNSUPPORTED 20U
+#define GRKIT_CONTROL_INVALID 21U
+#define GRKIT_CONTROL_BUSY 22U
+#define GRKIT_CONTROL_ATTACH 1U
+#define GRKIT_CONTROL_PING 2U
+#define GRKIT_CONTROL_SNAPSHOT_BEGIN 3U
+#define GRKIT_CONTROL_SNAPSHOT_READ 4U
+#define GRKIT_CONTROL_SNAPSHOT_END 5U
+#define GRKIT_CONTROL_APPLY_BEGIN 6U
+#define GRKIT_CONTROL_APPLY_WRITE 7U
+#define GRKIT_CONTROL_APPLY_COMMIT 8U
+#define GRKIT_CONTROL_APPLY_ABORT 9U
+#define GRKIT_CONTROL_CARD_IDENTITY 10U
 
 /* The capabilities of the core (grkit_core::capabilities): the handle of each
    CORE setting, and for each handle in order, its header word and its number
@@ -648,7 +718,7 @@
 #define GRKIT_CORE_RECIPE 0x10bU
 #define GRKIT_CORE_RECIPE_VALUES 0U
 #define GRKIT_CORE_RECIPE_BIT 0x800
-#define GRKIT_CORE_SETTING_WORDS 0,208,48,240,980,256,188,1048,1052,1092,1096,0
+#define GRKIT_CORE_SETTING_WORDS 0,212,48,244,984,260,192,1052,1056,1096,1100,0
 #define GRKIT_CORE_SETTING_VALUES 0,9,5,4,2,6,16,5,2,4,2,0
 
 /* An Image Control record. The records follow the header. */
@@ -825,6 +895,7 @@
 #define GRKIT_PLAN_MAGIC_VALUE 0x314d5247
 #define GRKIT_PLAN_SAFE 1U
 #define GRKIT_PLAN_PROFILE 2U
+#define GRKIT_PLAN_MANAGED 4U
 /* GRKIT_PLAN_MAGIC_VALUE. */
 #define GRKIT_PLAN_MAGIC 0
 /* Number of installed effects. */
@@ -839,7 +910,7 @@
 #define GRKIT_PLAN_MODULE_WORDS 20
 /* Artwork tiles of the usable modules. */
 #define GRKIT_PLAN_MODULE_TILES 24
-/* GRKIT_PLAN_SAFE and GRKIT_PLAN_PROFILE. */
+/* GRKIT_PLAN_SAFE, GRKIT_PLAN_PROFILE and GRKIT_PLAN_MANAGED. */
 #define GRKIT_PLAN_MODES 28
 /* Effect files past the listed ones. */
 #define GRKIT_PLAN_OVERFLOW 32
@@ -872,23 +943,35 @@
    enough. Word 0 counts the writes, and word 1 (GRKIT_SHOT_LAST_TURNS) holds
    the turns of the last shot with a known posture. Entry n is at
    GRKIT_SHOT_ENTRY + GRKIT_SHOT_STRIDE n and holds the key at GRKIT_SHOT_KEY,
-   the record at GRKIT_SHOT_RECORD, the posture of the electronic level at
-   GRKIT_SHOT_POSTURE, the effective capture crop at GRKIT_SHOT_FRAME_CROP, and
-   the border at GRKIT_SHOT_BORDER (runtime/processing.h). */
+   a private-look flag at GRKIT_SHOT_RECORD, the posture of the electronic
+   level at GRKIT_SHOT_POSTURE, the effective capture crop at
+   GRKIT_SHOT_FRAME_CROP, and the border at GRKIT_SHOT_BORDER
+   (runtime/processing.h). */
 #define GRKIT_SHOT_RING 141376
 #define GRKIT_SHOT_ENTRIES 8
 #define GRKIT_SHOT_ENTRY 8
-#define GRKIT_SHOT_STRIDE 32
+#define GRKIT_SHOT_STRIDE 256
 #define GRKIT_SHOT_KEY 0
 #define GRKIT_SHOT_RECORD 4
 #define GRKIT_SHOT_POSTURE 8
 #define GRKIT_SHOT_FRAME_CROP 12
 #define GRKIT_SHOT_BORDER 16
+#define GRKIT_SHOT_SEQUENCE 20
+#define GRKIT_SHOT_LOOK 32
+#define GRKIT_SHOT_LOOK_BYTES 104
+#define GRKIT_SHOT_LOOK_FEATURES 0
+#define GRKIT_SHOT_LOOK_MONO 4
+#define GRKIT_SHOT_LOOK_CODE 8
+#define GRKIT_SHOT_LOOK_NAME 12
+#define GRKIT_SHOT_LOOK_PARAMETERS 48
+#define GRKIT_SHOT_LOOK_SELECTIVE 60
+#define GRKIT_SHOT_LOOK_POST 76
+#define GRKIT_SHOT_LOOK_RGB 96
 #define GRKIT_SHOT_LAST_TURNS 4
-#define GRKIT_CANVAS_TABLE 141640
+#define GRKIT_CANVAS_TABLE 143432
 #define GRKIT_CANVAS_ENTRIES 4
 #define GRKIT_CANVAS_ENTRY_SIZE 80
-#define GRKIT_PICTURE_SCRATCH 141960
+#define GRKIT_PICTURE_SCRATCH 143752
 
 /* The layout of GrkitShot (runtime/sdk/grkit.h) that picture_shot fills:
    its size in bytes, the byte offset of each field, and the bits of
@@ -940,7 +1023,7 @@
    GRKIT_PROFILE_SLOT_SIZE bytes: calls, cycles, and the cycles of the largest
    call. The core points come first, then GRKIT_PROFILE_KINDS slots for each of
    those modules. */
-#define GRKIT_PROFILE 252552
+#define GRKIT_PROFILE 254344
 #define GRKIT_PROFILE_SIZE 500
 #define GRKIT_PROFILE_MODULES 8
 #define GRKIT_PROFILE_MODULE_SIZE 16
@@ -961,10 +1044,14 @@
 #define GRKIT_PROFILE_FILTER 1
 #define GRKIT_PROFILE_CALL 2
 /* Everything after the records: the script array must hold it. */
-#define GRKIT_TAIL_SIZE 257148
+#define GRKIT_TAIL_SIZE 260124
 /* The own red and blue curves of the native looks with Toning: for each of
    GRKIT_TONE_SLOTS slots, 256 u16 red samples, then the blue ones. */
-#define GRKIT_TONE_CURVES 253052
+#define GRKIT_TONE_CURVES 254844
+#define GRKIT_RECORD_PINS 258940
+#define GRKIT_LOOK_PREPARED_TONE 259100
+#define GRKIT_GLOBAL_RECORD_READERS 258940
+#define GRKIT_RECORD_PINS_SIZE 160
 #define GRKIT_TONE_SLOTS 4
 #define GRKIT_TONE_SLOT_SIZE 1024
 #define GRKIT_TEXT_SUMMARY 8192

@@ -110,7 +110,7 @@ static int install_pass(u32 code, u32 array, u32 pixels, const u32 *icon_bases, 
        setting with the same ID is not saved. The choices of the GRKit
        section, those of the effects, and the kept values follow the settings
        of the modules. */
-    u32 choices = CHOICE_ENTRIES(module_count, listed_count), total = setting_total + choices + kept_count;
+    u32 choices = CHOICE_ENTRIES(module_count, EFFECTS_LISTED), total = setting_total + choices + kept_count;
     store(array, total);
     store(array + 4, 0);
     for (u32 k = 0; k < setting_total; ++k) {
@@ -145,10 +145,16 @@ static int install_pass(u32 code, u32 array, u32 pixels, const u32 *icon_bases, 
         store(entry + 4, listed_choice[i]);
         store(entry + 8, EFFECT_CHOICE_VALUES);
     }
+    /* Empty slots have no saved key or offered values until App publishes a
+       new effect. Later settings retain their handles when the list grows. */
+    for (u32 i = listed_count; i < EFFECTS_LISTED; ++i) {
+        u32 entry = array + 4 * SETTINGS_ENTRY(setting_total + MANAGE_PER_MODULE * module_count + i);
+        store(entry, 0); store(entry + 4, 0); store(entry + 8, 0);
+    }
     /* The GRKit switch, Enable at Start, and Distance Unit follow the
        choices of the effects. apply_state restores the saved unit. The order
        of the values of each module follows them. */
-    u32 switch_handle = setting_total + MANAGE_PER_MODULE * module_count + listed_count;
+    u32 switch_handle = setting_total + MANAGE_PER_MODULE * module_count + EFFECTS_LISTED;
     u32 start_handle = switch_handle + 1, unit_handle = start_handle + 1, order_handle = unit_handle + 1;
     {
         u32 entry = array + 4 * SETTINGS_ENTRY(switch_handle);
@@ -181,7 +187,7 @@ static int install_pass(u32 code, u32 array, u32 pixels, const u32 *icon_bases, 
     for (u32 i = 0; i < module_count; ++i)
         if (module_usable >> i & 1) list_at += 4 * CONTEXT_WORDS(module_use_count[i]);
     u32 effects_list = list_at + 4 * MANAGE_WORDS(module_count);
-    u32 services = effects_list + 4 * EFFECT_LIST_WORDS(listed_count);
+    u32 services = effects_list + 4 * EFFECT_LIST_WORDS(EFFECTS_LISTED);
     u32 data_at = services + 4 * SERVICES_WORDS;
     u32 subscribers = 0;
     for (u32 k = 0; k < SERVICES_WORDS; ++k) store(services + 4 * k, 0);
@@ -404,7 +410,7 @@ static int install_pass(u32 code, u32 array, u32 pixels, const u32 *icon_bases, 
         if (data_bytes && !sync_alias(data_base, data_bytes)) return STATUS_SYNC;
         /* The tiles, in the icon slots after the effect icons. */
         for (u32 k = 0; k < tile_count; ++k) {
-            u32 slot = HOST_ICON_COUNT + count + module_tile_first[i] + k;
+            u32 slot = HOST_ICON_COUNT + 2 * MAX_COUNT + module_tile_first[i] + k;
             u32 icon = icon_bases[slot / ICONS_PER_CHUNK] + (slot % ICONS_PER_CHUNK) * ICON_STRIDE;
             icon_header(icon, pixels);
             copy(at(icon + ICON_PIXELS), tiles + k * GRM_TILE_BYTES, GRM_TILE_BYTES);
@@ -516,7 +522,7 @@ static int install_pass(u32 code, u32 array, u32 pixels, const u32 *icon_bases, 
     }
     /* The effect list of the GRKit section of MENU, with the record of each
        installed effect. */
-    effect_list = listed_count ? effects_list : 0;
+    effect_list = effects_list;
     store(effects_list + EFFECTS_COUNT, listed_count);
     store(effects_list + EFFECTS_SETTINGS, setting_total + MANAGE_PER_MODULE * module_count);
     for (u32 i = 0; i < listed_count; ++i) {
@@ -524,10 +530,11 @@ static int install_pass(u32 code, u32 array, u32 pixels, const u32 *icon_bases, 
         volatile u16 *name = (volatile u16 *)at(entry + EFFECTS_NAME);
         store(entry + EFFECTS_STATUS, listed_status[i]);
         store(entry + EFFECTS_RECORD, listed_record[i]);
+        store(entry + EFFECTS_SLOT, i);
         for (; n < CATALOG_EFFECT_NAME_MAX && listed[i][CATALOG_EFFECT_NAME + n]; ++n) name[n] = listed[i][CATALOG_EFFECT_NAME + n];
         while (n < EFFECTS_NAME_UNITS) name[n++] = 0;
     }
-    if (listed_count && !sync_alias(effects_list, 4 * EFFECT_LIST_WORDS(listed_count))) return STATUS_SYNC;
+    if (!sync_alias(effects_list, 4 * EFFECT_LIST_WORDS(EFFECTS_LISTED))) return STATUS_SYNC;
     if (!sync_alias(services, 4 * SERVICES_WORDS)) return STATUS_SYNC;
     return 0;
 }

@@ -5,6 +5,15 @@
 typedef unsigned int u32;
 typedef unsigned short u16;
 typedef unsigned char u8;
+static u32 look_mutation_allowed(volatile u32 *h);
+static u32 look_record_allowed(volatile u32 *h,u32 index);
+static void look_defer_native(volatile u32 *h);
+static void look_defer_dial_forget(volatile u32 *h,u32 u);
+static void look_telemetry_capture(volatile u32 *h);
+#define GRKIT_LOOK_MUTATION_ALLOWED(h) look_mutation_allowed(h)
+#define GRKIT_LOOK_RECORD_ALLOWED(h,index) look_record_allowed(h,index)
+#define GRKIT_LOOK_DEFER_DIAL_FORGET(h,u) look_defer_dial_forget(h,u)
+#include "look_publish.h"
 extern volatile u32 *menu_header(void);
 extern u32 menu_event_original(u32, const u16 *);
 extern void menu_exit_original(u32);
@@ -241,6 +250,7 @@ static void level_reapply(volatile u32 *h) {
 /* A native Image Control type is selected on the native ADJ slot: the
    GRKit effect ends. */
 static void native_ic_selected(volatile u32 *h) {
+    if(!look_mutation_allowed(h)) { look_defer_native(h); return; }
     h[GRKIT_HOST_ACTIVE/4]=0;
     GRKIT_STATE_CHANGED(h);
     level_reapply(h);
@@ -285,6 +295,23 @@ static void descriptor(volatile u32 *at, const u16 *name) {
 }
 /* The timer and UI services for modules and the pages of the core. */
 #include "ui.h"
+static u32 look_mutation_allowed(volatile u32 *h) {
+    if(!h[GRKIT_HOST_SERVICES/4]) return 1;
+    return !((volatile struct look_publish *)services_word(h,SERVICES_LOOK_PUBLISH))->prepared;
+}
+static u32 look_record_allowed(volatile u32 *h,u32 index) {
+    if(index>=GRKIT_TEXT_RECORDS) return 0;
+    if(!h[GRKIT_HOST_SERVICES/4]) return 1;
+    volatile struct look_publish *p=(volatile struct look_publish *)services_word(h,SERVICES_LOOK_PUBLISH);
+    return !(p->retired[index>>5]&(1U<<(index&31)));
+}
+static void look_defer_native(volatile u32 *h) {
+    ((volatile struct look_publish *)services_word(h,SERVICES_LOOK_PUBLISH))->deferred_native=1;
+}
+static void look_defer_dial_forget(volatile u32 *h,u32 u) {
+    if(u && u<=GRKIT_DIAL_USER_MODES)
+        ((volatile struct look_publish *)services_word(h,SERVICES_LOOK_PUBLISH))->deferred_dial_forget|=1U<<(u-1);
+}
 #include "ui_keyboard.h"
 #include "modules.h"
 /* Only the still-viewfinder slot consults module state. Playback continues
@@ -807,6 +834,7 @@ A32_ENTRY u32 menu_parameter_get(u32 index) {
 /* Nonzero when the value went to the record. */
 A32_ENTRY u32 menu_parameter_set(u32 index,u32 value) {
     volatile u32 *h=menu_header();
+    if(!GRKIT_LOOK_MUTATION_ALLOWED(h)) return 0;
     u32 record=menu_parameter_session();
     if(index==PARAMETER_TONING) record=toning_record(record);
     if(!record) return 0;
@@ -922,6 +950,38 @@ static void fit_row_text(u32 view) {
 #endif
 #include "menu_settings.h"
 #include "mode_dial.h"
+#include "control_mailbox.h"
+struct look_publish;
+static u32 look_publish_prepare_record(volatile u32 *,volatile struct look_publish *);
+static u32 look_publish_commit_record(volatile u32 *,volatile struct look_publish *);
+#define LOOK_PUBLISH_PREPARE_RECORD look_publish_prepare_record
+#define LOOK_PUBLISH_COMMIT_RECORD look_publish_commit_record
+#define LOOK_PUBLISH_BARRIER CONTROL_BARRIER
+#define LOOK_PUBLISH_CAPTURE(h) look_telemetry_capture(h)
+#include "look_publish_runtime.h"
+#define LOOK_TELEMETRY_RUNTIME
+#define LOOK_TELEMETRY_BARRIER CONTROL_BARRIER
+#include "look_telemetry.h"
+#include "library_resident.h"
+static void control_poll(volatile u32 *h) {
+    look_publish_poll(h,(volatile struct look_publish *)services_word(h,SERVICES_LOOK_PUBLISH));
+    {
+        volatile struct look_publish *p=(volatile struct look_publish *)services_word(h,SERVICES_LOOK_PUBLISH);
+        if(!p->prepared) {
+            if(p->deferred_native) { p->deferred_native=0; native_ic_selected(h); }
+            u32 forgotten=p->deferred_dial_forget;
+            p->deferred_dial_forget=0;
+            for(u32 u=1;u<=GRKIT_DIAL_USER_MODES;++u) if(forgotten&(1U<<(u-1))) {
+                dial_forget(h,u);
+                if(dial_word(h,DIAL_ACTIVE)[0]==u) dial_land_later(h);
+            }
+        }
+    }
+    look_telemetry_capture(h);
+    if(!h[GRKIT_HOST_CONTROL_WORD/4]) return;
+    control_poll_once((volatile struct control_mailbox *)SERVICES_MAP(SERVICES_CONTROL_ADDRESS(h[GRKIT_HOST_SERVICES/4])),
+                     (struct control_request *)services_word(h,SERVICES_CONTROL_CANDIDATE));
+}
 #include "persist.h"
 #include "menu_dial.h"
 #include "menu_recipes.h"
@@ -1406,7 +1466,7 @@ static u32 playback_icon(volatile u32 *h,u32 value) {
     u32 code=(value+0x100)&0xffff, i;
     if(value>>16!=1 || !(code&0x8000)) return 0;
     for(i=0;i<h[GRKIT_HOST_COUNT/4];++i)
-        if(*(volatile u16 *)(h[GRKIT_HOST_RECORDS/4]+i*GRKIT_RECORD_SIZE+GRKIT_RECORD_CODE)==code)
+        if(*(volatile u16 *)(record_address(h,i)+GRKIT_RECORD_CODE)==code)
             return 0x8000+i;
     return 0;
 }
@@ -1436,7 +1496,7 @@ static u32 icon_address(volatile u32 *h,u32 id) {
     if(id==GRKIT_ICON_SCALE_SIXTEEN) return h[GRKIT_HOST_GRKIT_ICON/4] ? h[GRKIT_HOST_GRKIT_ICON/4]+6*GRKIT_ICON_STRIDE : 0;
     if(id==0x7fff) return h[GRKIT_HOST_OFF_ICON/4] ? h[GRKIT_HOST_OFF_ICON/4] : NATIVE_OFF_ICON();
     if(index>=h[GRKIT_HOST_COUNT/4]) return 0;
-    return WORD(h[GRKIT_HOST_RECORDS/4]+index*GRKIT_RECORD_SIZE,GRKIT_RECORD_ICON);
+    return WORD(record_address(h,index),GRKIT_RECORD_ICON);
 }
 A32_ENTRY u32 menu_icon(u32 id) {
     volatile u32 *h=menu_header();
@@ -1461,7 +1521,7 @@ static u32 develop_running(void) {
 static u32 develop_effects(volatile u32 *h) {
     return h[GRKIT_HOST_CAPABILITIES/4]&GRKIT_CORE_TONE_BIT ? h[GRKIT_HOST_COUNT/4] : 0;
 }
-static u32 develop_record(volatile u32 *h,u32 i) { return h[GRKIT_HOST_RECORDS/4]+i*GRKIT_RECORD_SIZE; }
+static u32 develop_record(volatile u32 *h,u32 i) { return record_address(h,i); }
 /* The index of the effect of the development, or DEVELOP_NONE. */
 static u32 develop_index(volatile u32 *h) {
     u32 record=h[GRKIT_HOST_DEVELOP/4], i;
@@ -1764,3 +1824,9 @@ u32 crop_button_press(void) {
     return 1;
 }
 #endif
+
+/* These native draw hooks must outlive menu_icon(): its caller still reads
+   descriptor/pixel bytes after that getter returns. */
+#include "record_read.h"
+A32_ENTRY void menu_icon_reader_enter(void) { record_read_enter(menu_header()); }
+A32_ENTRY void menu_icon_reader_leave(void) { record_read_leave(menu_header()); }

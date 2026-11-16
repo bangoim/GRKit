@@ -23,6 +23,10 @@ extern volatile u32 *framing_header(void);
 
 #include "tone.h"
 #include "develop.h"
+#include "shot_look.h"
+#include "record_read.h"
+#include "services.h"
+#include "look_publish.h"
 /* A RAW development encodes the DNG in playback, not a new shot. Its picture
    takes the time of that DNG from the playback metadata (runtime/targets). */
 #ifndef PICTURE_DEVELOPING
@@ -51,7 +55,10 @@ static u32 record_of_code(volatile u32 *h,u32 code) {
     u32 n=h[GRKIT_HOST_COUNT/4], i, record;
     if(!(code&0x8000U) || n>GRKIT_TEXT_RECORDS) return 0;
     for(i=0;i<n;++i) {
-        record=h[GRKIT_HOST_RECORDS/4]+i*GRKIT_RECORD_SIZE;
+        u32 services=h[GRKIT_HOST_SERVICES/4];
+        if(services && (WORD(services+SERVICES_LOOK_PUBLISH,
+            __builtin_offsetof(struct look_publish,retired)+(i>>5)*4)&(1U<<(i&31)))) continue;
+        record=record_address(h,i);
         if(HALF(record,GRKIT_RECORD_CODE)==code) return record;
     }
     return 0;
@@ -204,27 +211,12 @@ __attribute__((used)) void grkit_export_local_time(u8 *out) {
     PICTURE_DATE(out);
 }
 __attribute__((used)) u32 grkit_export_divide(u32 n,u32 d) { return core_divide(n,d); }
-/* The white of the effect of a recorded picture: input 255 of the curves of
-   its record, after its post matrix, as R, G, B levels, and 255 each without
-   a record. The Fn adjustments are not in it. runtime/level.h gives the luma
-   of the same white to the live-view highlight warning. */
+/* The immutable white point prepared for this encode. Modules cannot
+   retain or dereference a registry record through PictureSet.reserved. */
 __attribute__((used)) void grkit_export_picture_white(const PictureSet *set,u8 *white) {
-    u32 record=set->record, post, k, c;
-    int rgb[3], v;
-    if(!record) { white[0]=white[1]=white[2]=255; return; }
-    post=WORD(record,GRKIT_RECORD_FEATURES)&GRKIT_FEATURE_POST;
-    for(c=0;c<3;++c) rgb[c]=(int)HALF(record,GRKIT_RECORD_CURVES+c*GRKIT_RECORD_CURVE_SIZE+255*2);
-    for(k=0;k<3;++k) {
-        v=rgb[k];
-        if(post) {
-            v=0;
-            for(c=0;c<3;++c) v+=(s16)HALF(record,GRKIT_RECORD_POST+(k*3+c)*2)*rgb[c];
-            v=(v+4096)>>13;
-        }
-        v=v<0 ? 0 : v>16383 ? 16383 : v;
-        white[k]=(u8)(((u32)v*255U+8192U)>>14);
-    }
+    for(u32 i=0;i<3;++i) white[i]=set->white ? (u8)(set->white>>(i*8)) : 255;
 }
+
 /* picture_shot: the shooting data of the shot of a plane set, in the
    layout of GrkitShot (GRKIT_SHOT_INFO_* in abi.h). */
 #define SHOT_INVALID ((int)0x80000000)
@@ -415,21 +407,33 @@ static u32 plane_of(u32 image,u32 code,Plane *p) {
 __attribute__((target("thumb"),minsize))
 #endif
 static u32 shot_word(volatile u32 *h,u32 shot,u32 field,u32 *out) {
-    u32 ring=PICTURE_SCRATCH(h)+GRKIT_SHOT_RING, n=WORD(ring,0), i, entry, value;
+    u32 ring=PICTURE_SCRATCH(h)+GRKIT_SHOT_RING, n=WORD(ring,0), i, entry, value, sequence;
     for(i=1;shot && i<=GRKIT_SHOT_ENTRIES;++i) {
         entry=ring+GRKIT_SHOT_ENTRY+((n-i)&(GRKIT_SHOT_ENTRIES-1))*GRKIT_SHOT_STRIDE;
-        if(WORD(entry,GRKIT_SHOT_KEY)!=shot) continue;
+        sequence=WORD(entry,GRKIT_SHOT_SEQUENCE);
+        if(!sequence || WORD(entry,GRKIT_SHOT_KEY)!=shot) continue;
         PICTURE_BARRIER();
         value=WORD(entry,field);
         PICTURE_BARRIER();
-        if(WORD(entry,GRKIT_SHOT_KEY)==shot) { *out=value; return 1; }
+        if(WORD(entry,GRKIT_SHOT_SEQUENCE)==sequence && WORD(entry,GRKIT_SHOT_KEY)==shot) { *out=value; return 1; }
     }
     return 0;
 }
-/* The record that the still build of a shot applied, or 0. */
-static u32 shot_record(volatile u32 *h,u32 shot) {
-    u32 record;
-    return shot_word(h,shot,GRKIT_SHOT_RECORD,&record) ? record : 0;
+/* Copy one generation before returning it. A reused shot key cannot pass
+   the sequence check after a ring wrap; no reader retains ring pointers. */
+static u32 shot_look_read(volatile u32 *h,u32 shot,ShotLook *out) {
+    u32 ring=PICTURE_SCRATCH(h)+GRKIT_SHOT_RING,n=WORD(ring,0);
+    for(u32 i=1;shot && i<=GRKIT_SHOT_ENTRIES;++i) {
+        u32 entry=ring+GRKIT_SHOT_ENTRY+((n-i)&(GRKIT_SHOT_ENTRIES-1))*GRKIT_SHOT_STRIDE;
+        u32 seq=WORD(entry,GRKIT_SHOT_SEQUENCE);
+        if(!seq || WORD(entry,GRKIT_SHOT_KEY)!=shot) continue;
+        PICTURE_BARRIER();
+        u32 own=WORD(entry,GRKIT_SHOT_RECORD)!=0;
+        for(u32 k=0;k<GRKIT_SHOT_LOOK_BYTES;++k) out->bytes[k]=BYTE(entry,GRKIT_SHOT_LOOK+k);
+        PICTURE_BARRIER();
+        if(WORD(entry,GRKIT_SHOT_SEQUENCE)==seq && WORD(entry,GRKIT_SHOT_KEY)==shot) return own ? 2U : 1U;
+    }
+    return 0;
 }
 
 /* The native sensor rectangle for this shot's digital crop and aspect 3:2.
@@ -513,22 +517,22 @@ static u32 orientation_turns(u32 orientation) {
     return orientation==6 ? 1 : orientation==3 ? 2 : orientation==8 ? 3 : 0;
 }
 #include "canvas_shot.h"
-/* The record of a shot, or 0: the Fn adjustments of the shot (tag 0x247). */
-u32 picture_capture_record(u32 shot) { return shot_record(framing_header(),shot); }
-/* For picture_capture_tone: the record whose code the picture records, or 0.
-   A capture or a RAW development has the entry of its build in the shot
-   ring. A write without one in playback (GRKIT_HOST_FRAME_FILE is not 0
-   there, and 0 while shooting) is an edit of the photo shown, such as Resize,
-   which does not run Image Control: it keeps the GRKit effect that the photo
-   records. The native tag would record Standard. */
-u32 picture_capture_tone_record(u32 shot) {
+/* Capture uses the build's immutable code. A playback rewrite without a
+   build keeps the code already present in the image. Zero means native. */
+u32 picture_capture_tone_code(u32 shot) {
     volatile u32 *h=framing_header();
-    u32 record;
-    if(shot_word(h,shot,GRKIT_SHOT_RECORD,&record)) return record;
+    ShotLook look;
+    u32 state=shot_look_read(h,shot,&look);
+    if(state) return state==2 ? shot_look_u16(&look,GRKIT_SHOT_LOOK_CODE) : 0;
 #ifdef FW_DEVELOP_MODEL
     if(((volatile u8 *)h)[GRKIT_HOST_FRAME_FILE]) {
         u32 value=PICTURE_PLAYBACK_TONE();
-        if(value>>16==1) return record_of_code(h,(value+0x100)&0xffffU);
+        if(value>>16==1) {
+            record_read_enter(h);
+            u32 code=record_of_code(h,(value+0x100)&0xffffU) ? (value+0x100)&0xffffU : 0;
+            record_read_leave(h);
+            return code;
+        }
     }
 #endif
     return 0;
@@ -545,10 +549,10 @@ u32 picture_capture_tone_record(u32 shot) {
 void picture_record_parameters(u32 entry,u32 shot) {
     static const u8 elements[9]={0,1,2,3,4,5,6,9,10};
     volatile u32 *h=framing_header();
-    u32 record=picture_capture_record(shot), running=PICTURE_DEVELOPING(), i;
-    if(!record) return;
-    for(i=0;i<sizeof(elements);++i)
-        PICTURE_IFD_SET_SHORT(entry,elements[i],(develop_parameter(h,record,i,running)-4)&0xffffU);
+    ShotLook look;
+    if(shot_look_read(h,shot,&look)!=2) return;
+    for(u32 i=0;i<sizeof(elements);++i)
+        PICTURE_IFD_SET_SHORT(entry,elements[i],(look.bytes[GRKIT_SHOT_LOOK_PARAMETERS+i]-4)&0xffffU);
 }
 /* For grain_gate (runtime/picture.S): the stage flag of the grain stage of a
    recorded picture. The stage gate runs before the parameter build of the
@@ -558,7 +562,7 @@ void picture_record_parameters(u32 entry,u32 shot) {
    not neutral. The record is the one that the build takes (module_parameters
    in runtime/processing.h): the effect of a RAW development, or the
    committed effect. Native processing keeps `flag`, the native result. */
-u32 picture_gate_flag(u32 flag) {
+static u32 picture_gate_flag_value(u32 flag) {
     volatile u32 *h=framing_header();
     u32 record, running;
     if(!(h[GRKIT_HOST_CAPABILITIES/4]&GRKIT_CORE_TONE_BIT)) return flag;
@@ -578,30 +582,39 @@ static u32 native_monochrome(u32 shot) {
 #endif
     return type<32 && (NATIVE_MONOCHROME_TYPES>>type&1);
 }
+u32 picture_gate_flag(u32 flag) {
+    volatile u32 *h=framing_header();
+    record_read_enter(h);
+    u32 value=picture_gate_flag_value(flag);
+    record_read_leave(h);
+    return value;
+}
 /* Once per plane set. The second full-size image (descriptor 3) shares the
    main planes. `canvas` is the table entry of a shot with a border
    (runtime/canvas_shot.h), or 0. */
 static void encode_shot(volatile u32 *h,u32 message,const u32 *canvas) {
     /* Configuration +0x34 holds the shot settings of the encoded pictures. */
-    u32 config=WORD(message,8), record=shot_record(h,WORD(config,0x34));
+    u32 config=WORD(message,8);
+    ShotLook look;
+    u32 have_look=shot_look_read(h,WORD(config,0x34),&look)==2;
     u32 done[4], selective, values[MODULE_FILTER_MAX], filters=module_filters(h), any, i, j;
     PictureSet set;
     Plane p;
     set.count=0;
-    set.record=0;
+    set.white=0;
     set.mono=0;
     set.scratch=PICTURE_MAP(PICTURE_SCRATCH(h));
     /* A RAW development turns as its DNG records, not as the camera is held. */
     set.turns=PICTURE_DEVELOPING() ? orientation_turns(PICTURE_PHOTO_ORIENTATION()) : picture_turns(h,WORD(config,0x34));
     /* The shooting data (picture_shot); in a RAW development, that of the DNG. */
     set.shot=WORD(config,0x34);
-    if(owned(h,record)) {
-        set.record=record;
-        set.mono=WORD(record,GRKIT_RECORD_MONOCHROME)&1;
+    if(have_look) {
+        set.white=shot_look_white(&look);
+        set.mono=shot_look_u32(&look,GRKIT_SHOT_LOOK_MONO)&1;
     }
     else set.mono=native_monochrome(WORD(config,0x34));
     /* The color of the effect first: selective color of its record. */
-    selective=selective_wanted(&set);
+    selective=have_look && !set.mono && (shot_look_u32(&look,GRKIT_SHOT_LOOK_FEATURES)&GRKIT_FEATURE_SELECTIVE);
     any=selective;
     /* The value of each filter. A filter does not run at 0, or while a soft
        Off stops its module. */
@@ -632,7 +645,7 @@ static void encode_shot(volatile u32 *h,u32 message,const u32 *canvas) {
     (void)canvas;
 #endif
     for(i=0;i<set.count;++i) flush(&set.planes[i]);
-    if(selective) selective_encode(&set);
+    if(selective) selective_encode(&set,&look);
     /* The module filters follow the color of the effect, in stage order. */
     for(i=0;i<filters;++i) if(values[i]) {
         u32 start=profile_begin(h);
@@ -989,14 +1002,18 @@ void grain_noise(u32 buffer,u32 size,u32 pitch,u32 height) {
    all follow +0x48. No segment is written while no module runs (the GRKit
    switch is Off, or safe mode), for a code without a name, or into a buffer
    without room for the largest APP7. */
-void picture_jpeg_xmp(u32 writer) {
+static __attribute__((noinline)) void picture_jpeg_xmp_value(u32 writer,u32 shot) {
     volatile u32 *h=framing_header();
     u32 buffer=WORD(writer,JPEG_WRITER_BUFFER), size=WORD(writer,JPEG_WRITER_SIZE), at=WORD(writer,JPEG_WRITER_APP7);
     u32 code, record, segment, units=XMP_NAME_UNITS, i;
     u16 name[XMP_NATIVE_UNITS>XMP_NAME_UNITS ? XMP_NATIVE_UNITS : XMP_NAME_UNITS];
     if(!h || !h[GRKIT_HOST_CAPABILITIES/4] || !buffer || at<=JPEG_TIFF || at>size || (at&(XMP_ALIGN-1))) return;
     if(!xmp_tone_code(PICTURE_JPEG_MAP(buffer+JPEG_TIFF,at-JPEG_TIFF),at-JPEG_TIFF,&code)) return;
-    if((record=record_of_code(h,code))) {
+    if(shot && (code&0x8000U)) {
+        ShotLook look;
+        if(shot_look_read(h,shot,&look)!=2 || shot_look_u16(&look,GRKIT_SHOT_LOOK_CODE)!=code) return;
+        for(i=0;i<XMP_NAME_UNITS;++i) name[i]=(u16)shot_look_u16(&look,GRKIT_SHOT_LOOK_NAME+i*2);
+    } else if(!shot && (record=record_of_code(h,code))) {
         for(i=0;i<XMP_NAME_UNITS;++i) name[i]=HALF(record,GRKIT_RECORD_NAME+i*2);
     } else if(xmp_native_name(code,name,XMP_NATIVE_UNITS)) {
         units=XMP_NATIVE_UNITS;
@@ -1007,4 +1024,22 @@ void picture_jpeg_xmp(u32 writer) {
     if(!segment || segment>size-at || size-at-segment<XMP_APP7_RESERVE) return;
     xmp_write_segment(PICTURE_JPEG_MAP(buffer+at,segment),segment,name,units);
     WORD(writer,JPEG_WRITER_APP7)=at+segment;
+}
+
+void picture_jpeg_xmp(u32 writer) {
+    volatile u32 *h=framing_header();
+    if(!h) return;
+    record_read_enter(h);
+    picture_jpeg_xmp_value(writer,0);
+    record_read_leave(h);
+}
+
+/* GR III and GR IV 1.21 ImageInfoGroup select the shot settings by its current group index.
+   GR IV 1.21 getter 0x5382c44c uses this same index. The normal JPEG writer owns this group at +8. Rewrites use another object
+   and deliberately keep their separate path above. */
+void picture_jpeg_capture_xmp(u32 writer) {
+    u32 group=WORD(writer,8);
+    if(!group || BYTE(group,0)>3) return;
+    u32 shot=WORD(group,(2U+BYTE(group,0))*4U);
+    if(shot) picture_jpeg_xmp_value(writer,shot);
 }

@@ -228,8 +228,8 @@ GRKIT_MAYBE_UNUSED static void overlay_label(const Surface *s,u32 label,u32 left
 typedef struct { u32 y,c,width,height,pitch,half,left,top,right,bottom; } Plane;
 /* The address of the chroma row of luma row y. */
 static inline u32 chroma_row(const Plane *p,u32 y) { return p->c+(p->half ? y>>1 : y)*p->pitch; }
-/* The deduplicated planes of one encode. `record` is the processing record of
-   the shot, or 0 for native processing, and `mono` is set for a monochrome
+/* The deduplicated planes of one encode. `white` is the packed immutable white point of
+   the shot (0 for native white), and `mono` is set for a monochrome
    record or a native monochrome Image Control type. `scratch` holds GRKIT_PICTURE_MASKS bytes for this call.
    `turns` is the quarter turns clockwise that show the picture upright.
    `shot` is the shot settings pointer of the encode (picture_shot); the SDK
@@ -237,7 +237,7 @@ static inline u32 chroma_row(const Plane *p,u32 y) { return p->c+(p->half ? y>>1
 typedef struct {
     Plane planes[4];
     u32 count;
-    u32 record;
+    u32 white;
     u32 mono;
     u8 *scratch;
     u32 turns;

@@ -1,5 +1,6 @@
 #ifndef GRKIT_LEVEL_H
 #define GRKIT_LEVEL_H
+#include "record_read.h"
 /* The live-view highlight warning, part of the framing component
    (runtime/framing.c), which includes this file once.
    The live view warns where the shown luma reaches the threshold that
@@ -9,7 +10,7 @@
    white, less 1: input 255 of its curves, after its post matrix, with the
    BT.601 luma weights. The Fn adjustments are not in it. runtime/menu.c sets
    the warning again after a change of the effect. */
-static u32 level_threshold(volatile u32 *h) {
+static u32 level_threshold_value(volatile u32 *h) {
     static const int luma[3]={77,150,29};
     u32 record=h[GRKIT_HOST_ACTIVE/4], post, c, k, y8;
     int rgb[3], sum, y=0;
@@ -28,6 +29,12 @@ static u32 level_threshold(volatile u32 *h) {
     /* y is the 14-bit luma in Q8. Round the 8-bit luma up. */
     y8=(((u32)y>>8)*255U+16383U)>>14;
     return y8>=255U ? 0xfe00U : y8 ? (y8-1U)<<8 : 0;
+}
+static u32 level_threshold(volatile u32 *h) {
+    record_read_enter(h);
+    u32 value=level_threshold_value(h);
+    record_read_leave(h);
+    return value;
 }
 /* framing_level_threshold (runtime/framing.S): the threshold of a warning
    that the camera turns on. */

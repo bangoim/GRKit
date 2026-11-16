@@ -2,14 +2,16 @@
 //! SCAN and INSTALL, then stays resident to restore and save the state.
 
 use super::*;
+use crate::abi::RECORD_ID;
 use crate::abi::{
     CUE_PENDING, CUE_UPDATED, CUE_UPDATE_READY, DIAL_SET_WORDS, HOST_CUE_LABEL, HOST_DIAL_SETS,
     HOST_DIAL_SET_CHANGES, HOST_LOAD_CUE, HOST_PERSIST_WORD, HOST_PROCESSING_CALLS, HOST_PROFILE,
     HOST_RECIPE_CHANGES, HOST_UPDATE, HOST_UPDATE_VERSION, PERSIST_CORE, PERSIST_EFFECTS,
-    PERSIST_EFFECT_COUNT, PERSIST_EFFECT_WORDS, PERSIST_MODULES, PERSIST_MODULE_COUNT,
-    PERSIST_MODULE_WORDS, PERSIST_READY, PERSIST_RELEASE, PERSIST_REQUEST, PERSIST_REVISION,
-    PERSIST_WORDS, PROFILE, PROFILE_KINDS, PROFILE_MODULES, PROFILE_MODULE_SIZE, PROFILE_POINTS,
-    PROFILE_SLOTS, PROFILE_SLOT_SIZE, UPDATE_CONFIRMED, UPDATE_READY, UPDATE_WAITING,
+    PERSIST_EFFECT_CAPACITY, PERSIST_EFFECT_COUNT, PERSIST_EFFECT_WORDS, PERSIST_MODULES,
+    PERSIST_MODULE_COUNT, PERSIST_MODULE_WORDS, PERSIST_READY, PERSIST_RELEASE, PERSIST_REQUEST,
+    PERSIST_REVISION, PERSIST_WORDS, PROFILE, PROFILE_KINDS, PROFILE_MODULES, PROFILE_MODULE_SIZE,
+    PROFILE_POINTS, PROFILE_SLOTS, PROFILE_SLOT_SIZE, UPDATE_CONFIRMED, UPDATE_READY,
+    UPDATE_WAITING,
 };
 use crate::capabilities::{self, StateFile};
 use crate::card::{DATA_FOLDER, LINUX_DIRECTORY, RTOS_PACKAGE_FOLDER};
@@ -18,6 +20,7 @@ use crate::card::{DATA_FOLDER, LINUX_DIRECTORY, RTOS_PACKAGE_FOLDER};
 /// state file when two reads in a row agree, so a change reaches the card
 /// one to two intervals after the last change.
 pub const STATE_POLL_MS: u32 = 2000;
+const OWNER_POLL_MS: u32 = 100;
 /// After an INSTALL through the fast-boot files, the resident loader runs
 /// `SCAN.SH serve` (`SCAN_SERVE_ARGUMENT`) at this many polls, one each, to
 /// start the service: about a minute, the time that Linux and the card can
@@ -256,13 +259,13 @@ pub fn loader_with(icon_stride: usize, fast: &[FastRelease]) -> Vec<u8> {
         "if moduletiles < 0 goto reject".into(),
         format!("if moduletiles > {MODULE_TILES_MAX} goto reject"),
         format!(
-            "expected = {} + count * {}",
+            "expected = {} + {MAX_COUNT} * {}",
             HEADER_SIZE / 4,
             RECORD_SIZE / 4
         ),
         "if words != expected goto reject".into(),
         format!(
-            "expectedchunks = (count + moduletiles + {}) / {ICONS_PER_CHUNK}",
+            "expectedchunks = (2 * {MAX_COUNT} + moduletiles + {}) / {ICONS_PER_CHUNK}",
             HOST_ICON_COUNT + ICONS_PER_CHUNK - 1
         ),
         "if chunks != expectedchunks goto reject".into(),
@@ -277,7 +280,7 @@ pub fn loader_with(icon_stride: usize, fast: &[FastRelease]) -> Vec<u8> {
         lines.extend([
             format!("if chunks <= {i} goto icons_ready"),
             format!(
-                "items = count + moduletiles + {HOST_ICON_COUNT} - {}",
+                "items = 2 * {MAX_COUNT} + moduletiles + {HOST_ICON_COUNT} - {}",
                 i * ICONS_PER_CHUNK
             ),
             format!("if items > {ICONS_PER_CHUNK} items = {ICONS_PER_CHUNK}"),
@@ -293,6 +296,9 @@ pub fn loader_with(icon_stride: usize, fast: &[FastRelease]) -> Vec<u8> {
         ":modules_ready".into(),
         // The tail: the picture scratch, the menu text, and the labels.
         format!("intdim tailarea {TAIL_WORDS}"),
+        // Each script array is limited to 256 KiB. Keep replacement records
+        // in a separate bank so readers can finish using the previous bank.
+        format!("intdim recordbank {}", MAX_COUNT * RECORD_SIZE / 4),
     ]);
     if !fast.is_empty() {
         lines.extend([
@@ -583,6 +589,7 @@ fn state_script() -> Vec<String> {
     let mut lines: Vec<String> = vec![
         ":resident".into(),
         "stateok = 1".into(),
+        "ownerpolls = 0".into(),
         format!("foldersearch '{DATA_FOLDER}'"),
         format!("if result = 0 foldercreate '{DATA_FOLDER}'"),
         format!("foldersearch '{DATA_FOLDER}'"),
@@ -640,7 +647,7 @@ fn state_script() -> Vec<String> {
         format!("profile = {}", word(HOST_PROFILE)),
         "if profile <> 0 goto profile_watch".into(),
         ":watch".into(),
-        format!("mpause {STATE_POLL_MS}"),
+        format!("mpause {OWNER_POLL_MS}"),
     ]);
     lines.extend(watch_poll("watch"));
 
@@ -695,13 +702,32 @@ fn state_script() -> Vec<String> {
                     "ptone = {}",
                     persist_entry(PERSIST_EFFECTS, "pindex", PERSIST_EFFECT_WORDS, 2)
                 ),
+            ]);
+            for word in 0..8 {
+                lines.push(format!(
+                    "pid{word} = {}",
+                    persist_entry(PERSIST_EFFECTS, "pindex", PERSIST_EFFECT_WORDS, 3 + word)
+                ));
+            }
+            lines.extend([
                 "goto save_parameter_values".into(),
                 ":save_legacy_parameters".into(),
                 "call legacy_parameters".into(),
                 ":save_parameter_values".into(),
+            ]);
+            for word in 0..8 {
+                lines.extend([
+                    format!("pkey = pcode + {}", LOOK_ID_KEY_BASE + word * 32768),
+                    "int2str line pkey".into(),
+                    "filewriteln sfh line".into(),
+                    format!("int2str line pid{word}"),
+                    "filewriteln sfh line".into(),
+                ]);
+            }
+            lines.extend([
                 "pkey = pcode".into(),
                 "if pvalue = 0 goto save_toning".into(),
-                format!("pkey = pkey + {PARAMETER_KEY_BASE}"),
+                format!("pkey = pkey + {LOOK_PARAMETER_KEY_BASE}"),
                 "int2str line pkey".into(),
                 "filewriteln sfh line".into(),
                 "int2str line pvalue".into(),
@@ -710,7 +736,7 @@ fn state_script() -> Vec<String> {
                 "if ptone < 1 goto save_parameters_next".into(),
                 "if ptone > 8 goto save_parameters_next".into(),
                 "pkey = pcode".into(),
-                format!("pkey = pkey + {TONING_KEY_BASE}"),
+                format!("pkey = pkey + {LOOK_TONING_KEY_BASE}"),
                 "int2str line pkey".into(),
                 "filewriteln sfh line".into(),
                 "int2str line ptone".into(),
@@ -898,9 +924,7 @@ fn profile_script() -> Vec<String> {
         "filewriteln pfh 'GRKit profile: for each period, the live-view frames; for each point, calls, CPU cycles, and the cycles of the largest call'".into(),
         "fileclose pfh".into(),
         ":profile_poll".into(),
-        format!("mpause {STATE_POLL_MS}"),
-        "ppolls = ppolls + 1".into(),
-        format!("if ppolls >= {PROFILE_POLLS} call profile_write"),
+        format!("mpause {OWNER_POLL_MS}"),
     ]);
     lines.extend(watch_poll("profile_poll"));
     lines.extend([
@@ -1133,7 +1157,7 @@ fn persist_capture() -> Vec<String> {
         "mpause 1".into(),
         format!("pcount = {}", persist_word(PERSIST_EFFECT_COUNT)),
         "if pcount < 0 goto capture_invalid".into(),
-        format!("if pcount > {MAX_COUNT} goto capture_invalid"),
+        format!("if pcount > {PERSIST_EFFECT_CAPACITY} goto capture_invalid"),
         format!("mcount = {}", persist_word(PERSIST_MODULE_COUNT)),
         "if mcount < 0 goto capture_invalid".into(),
         format!("if mcount > {MODULE_SETTINGS_MAX} goto capture_invalid"),
@@ -1194,12 +1218,30 @@ fn legacy_capture() -> Vec<String> {
     lines.extend([
         "return".into(),
         ":legacy_parameters".into(),
-        format!("pcode = {} and 32767", record("pindex", RECORD_CODE)),
+        "pcode = 7621".into(),
         format!("pw0 = {}", record("pindex", RECORD_PARAMETERS)),
         format!("pw1 = {}", record("pindex", RECORD_PARAMETERS + 4)),
         format!("pw2 = {}", record("pindex", RECORD_PARAMETERS + 8)),
         "pvalue = 0".into(),
     ]);
+    // Low 15-bit FNV arithmetic stays inside signed TTL integers. Full ID
+    // words prove ownership of the bucket on the next startup.
+    for word in 0..8 {
+        lines.push(format!("pid{word} = 0"));
+        for byte in 0..4 {
+            lines.extend([
+                format!(
+                    "pdigit = ({} >> {}) and 255",
+                    record("pindex", RECORD_ID + word * 4),
+                    byte * 8
+                ),
+                format!("pid{word} = pid{word} or (pdigit << {})", byte * 7),
+                format!("if pdigit = 0 goto legacy_id_{word}_{byte}"),
+                "pcode = (((pcode or pdigit) - (pcode and pdigit)) * 403) and 32767".into(),
+                format!(":legacy_id_{word}_{byte}"),
+            ]);
+        }
+    }
     for digit in (0..PARAMETER_COUNT).rev() {
         lines.extend([
             format!("pdigit = (pw{} >> {}) and 255", digit / 4, digit % 4 * 8),
@@ -1223,6 +1265,48 @@ fn legacy_capture() -> Vec<String> {
 /// every completed capture, including a skipped or failed save.
 fn watch_poll(name: &str) -> Vec<String> {
     let mut lines = vec![
+        format!(
+            "ownerword = registry[{}]",
+            crate::abi::HOST_CONTROL_WORD / 4
+        ),
+        "ownerentry = 0".into(),
+        "if fast = 0 goto owner_poll_end_".to_owned() + name,
+        "if ownerword <= 0 goto owner_poll_end_".to_owned() + name,
+        // CONTROL_OWNER_ENTRY is runtime-owned. The first array retains this
+        // argument after SYS_memovr reads the 20-byte trampoline over its head.
+        format!(
+            "if ownerword + {} >= modulewords goto owner_poll_end_{name}",
+            crate::abi::CONTROL_READY / 4
+        ),
+        format!(
+            "ownerentry = modulecode[ownerword + {}]",
+            crate::abi::CONTROL_OWNER_ENTRY / 4
+        ),
+        "if ownerentry = 0 goto owner_poll_end_".to_owned() + name,
+        format!(
+            "ownerpending = modulecode[ownerword + {}]",
+            crate::abi::CONTROL_OWNER_POLL / 4
+        ),
+        format!("if ownerpending <> 0 goto owner_poll_call_{name}"),
+        format!(
+            "ownerrequest = modulecode[ownerword + {}]",
+            crate::abi::CONTROL_REQUEST / 4
+        ),
+        format!(
+            "ownerready = modulecode[ownerword + {}]",
+            crate::abi::CONTROL_READY / 4
+        ),
+        format!("if ownerrequest = ownerready goto owner_poll_end_{name}"),
+        format!(":owner_poll_call_{name}"),
+        "ba[252] = ownerentry".into(),
+        format!("sendln 'SYS_memovr {} 0 call'", core_path("OWNER.BIN")),
+        format!(":owner_poll_end_{name}"),
+        "ownerpolls = ownerpolls + 1".into(),
+        format!(
+            "if ownerpolls < {} goto {name}",
+            STATE_POLL_MS / OWNER_POLL_MS
+        ),
+        "ownerpolls = 0".into(),
         format!("if servepolls < {SERVE_POLLS} call serve"),
         "call update_poll".into(),
         "call capture".into(),
@@ -1237,6 +1321,19 @@ fn watch_poll(name: &str) -> Vec<String> {
         "call release_capture".into(),
         format!(":{name}_state_saved"),
     ];
+    if name == "profile_poll" {
+        let capture = lines
+            .iter()
+            .position(|line| line == "call capture")
+            .unwrap();
+        lines.splice(
+            capture..capture,
+            [
+                "ppolls = ppolls + 1".into(),
+                format!("if ppolls >= {PROFILE_POLLS} call profile_write"),
+            ],
+        );
+    }
     for file in [StateFile::Recipes, StateFile::DialSets] {
         let (changes, at, saved, stamp) = watch_names(file);
         let next = format!("{name}_{}_saved", label(file));
@@ -1288,7 +1385,7 @@ mod tests {
                 offset / 4
             )
         };
-        let allowed = [
+        let mut allowed = vec![
             recipes.clone(),
             sets.clone(),
             record("index", RECORD_CODE),
@@ -1298,6 +1395,7 @@ mod tests {
             record("pindex", RECORD_PARAMETERS + 8),
             record("pindex", RECORD_TONING & !3),
         ];
+        allowed.extend((0..8).map(|i| record("pindex", RECORD_ID + i * 4)));
         for (at, _) in script.match_indices("registry[") {
             let index = &script[at + 9..];
             let index = &index[..index.find(']').unwrap()];
@@ -1328,7 +1426,9 @@ mod tests {
             .unwrap();
         assert!(at(&capture, "if pbase > pmax return") < first_read);
         assert!(capture.contains(&format!("pmax = modulewords - {PERSIST_WORDS}")));
-        assert!(capture.contains(&format!("if pcount > {MAX_COUNT} goto capture_invalid")));
+        assert!(capture.contains(&format!(
+            "if pcount > {PERSIST_EFFECT_CAPACITY} goto capture_invalid"
+        )));
         assert!(capture.contains(&format!(
             "if mcount > {MODULE_SETTINGS_MAX} goto capture_invalid"
         )));
@@ -1337,7 +1437,10 @@ mod tests {
         assert_eq!(script.matches("if pindex >= pcount goto").count(), 1);
         assert_eq!(script.matches("if mindex >= mcount goto").count(), 1);
         const {
-            assert!(PERSIST_EFFECTS / 4 + MAX_COUNT * PERSIST_EFFECT_WORDS <= PERSIST_WORDS);
+            assert!(
+                PERSIST_EFFECTS / 4 + PERSIST_EFFECT_CAPACITY * PERSIST_EFFECT_WORDS
+                    <= PERSIST_WORDS
+            );
             assert!(
                 PERSIST_MODULES / 4 + MODULE_SETTINGS_MAX * PERSIST_MODULE_WORDS <= PERSIST_WORDS
             );
@@ -1443,10 +1546,21 @@ mod tests {
         assert!(crate::card::SERVE_FILE.ends_with(&format!("/{SERVE_NAME}")));
         let watch = at(&script, ":watch");
         assert!(all < watch);
-        assert_eq!(script[watch + 1], format!("mpause {STATE_POLL_MS}"));
-        assert_eq!(
-            script[watch + 2],
-            format!("if servepolls < {SERVE_POLLS} call serve")
+        assert_eq!(script[watch + 1], format!("mpause {OWNER_POLL_MS}"));
+        let cadence = at(
+            &script,
+            &format!(
+                "if ownerpolls < {} goto watch",
+                STATE_POLL_MS / OWNER_POLL_MS
+            ),
+        );
+        assert!(watch < cadence);
+        assert!(
+            cadence
+                < at(
+                    &script,
+                    &format!("if servepolls < {SERVE_POLLS} call serve")
+                )
         );
         let serve = at(&script, ":serve");
         assert_eq!(
@@ -1471,7 +1585,16 @@ mod tests {
     fn the_resident_script_makes_a_confirmed_update_run_at_the_next_start() {
         let script = state_script();
         let watch = at(&script, ":watch");
-        assert_eq!(script[watch + 3], "call update_poll");
+        assert!(watch < at(&script, "call update_poll"));
+        assert!(
+            at(
+                &script,
+                &format!(
+                    "if ownerpolls < {} goto watch",
+                    STATE_POLL_MS / OWNER_POLL_MS
+                )
+            ) < at(&script, "call update_poll")
+        );
         assert!(at(&script, "updatepolls = 0") < watch && at(&script, "updatelooks = 0") < watch);
         let word = format!("registry[{}]", HOST_UPDATE / 4);
         let update = at(&script, ":update_poll");
@@ -1605,7 +1728,10 @@ mod tests {
     fn the_resident_script_saves_after_the_selections_settle() {
         let script = state_script();
         let start = at(&script, ":watch");
-        assert_eq!(script[start + 4], "call capture");
+        let capture = at(&script, "call capture");
+        assert!(start < at(&script, ":owner_poll_end_watch"));
+        assert!(at(&script, ":owner_poll_end_watch") < capture);
+        assert!(at(&script, "if fast = 0 goto owner_poll_end_watch") < capture);
         assert!(!script
             .iter()
             .any(|line| line.contains("hold") || line.contains("total =")));
@@ -2055,7 +2181,11 @@ mod tests {
         assert_eq!(lines[check + 1], "intdim registry words");
         let tail = at(&format!("intdim tailarea {TAIL_WORDS}"));
         assert_eq!(
-            lines[tail + 1..tail + 16],
+            lines[tail + 1],
+            format!("intdim recordbank {}", MAX_COUNT * RECORD_SIZE / 4)
+        );
+        assert_eq!(
+            lines[tail + 2..tail + 17],
             [
                 "allocated = 1",
                 "hadcount = count",

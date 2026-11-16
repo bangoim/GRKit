@@ -61,7 +61,8 @@ typedef int (*fs_stat_fn)(const char *name, void *out);
 #define FS_REMOVE   ((fs_name_fn)RT_FS_REMOVE)
 #define FS_MKDIR    ((fs_name_fn)RT_FS_MKDIR)
 #define FS_OPENDIR  ((fs_opendir_fn)RT_FS_OPENDIR)
-#define FS_READDIR  ((fs_readdir_fn)RT_FS_READDIR)
+#include "../library_directory_target.h"
+#define FS_READDIR library_directory_target_read
 #define FS_CLOSEDIR ((fs_closedir_fn)RT_FS_CLOSEDIR)
 #define FS_RENAME   ((fs_rename_fn)RT_FS_RENAME)
 #define FS_SIZE     ((fs_stat_fn)RT_FS_STAT_SIZE)   /* out[2] = size, 0 ok */
@@ -503,6 +504,7 @@ static u32 card_size(const char *dos, int *exists)
    0x8800 = O_RDONLY|O_CLOEXEC, 0xc000 = O_DIRECTORY|O_CLOEXEC,
    0xc1 = O_WRONLY|O_CREAT|O_EXCL, 0x241 = O_WRONLY|O_CREAT|O_TRUNC,
    0x101002 = /dev/mem O_RDWR|O_SYNC. */
+#include "managed_presence.h"
 static long do_open(const char *path, u32 flags)
 {
     long s = slot();
@@ -548,6 +550,13 @@ static long do_open(const char *path, u32 flags)
             }
             o->kind = CARD_DIR;
         } else if (flags == 0x8800) {
+            int managed = same_name(dos,"C:\\GRKIT\\LIB0.BIN") || same_name(dos,"C:\\GRKIT\\LIB1.BIN") ||
+                          same_name(dos,"C:\\GRKIT\\LIB.ACT");
+            if (managed) {
+                int found=fast_managed_presence(dos+9,dir_entry);
+                if (found<0) return EIO_ERROR;
+                if (!found) return ENOENT_ERROR;
+            }
             struct cached_file *c = cache_file(dos);
             if (c) {
                 o->bytes = cache.bytes + c->offset;
@@ -555,7 +564,7 @@ static long do_open(const char *path, u32 flags)
                 o->kind = CACHED_FILE;
                 return (long)(s + FIRST_FD);
             }
-            if (cache_missing(dos)) return ENOENT_ERROR;
+            if (!managed && cache_missing(dos)) return ENOENT_ERROR;
             u32 listed_size = 0, stamp = 0;
             int listed = listed_file(dos, 0, &listed_size, &stamp);
             if (listed > 0 && pack_folder(dos) && (c = pack_file(dos, listed_size, stamp))) {
@@ -564,15 +573,19 @@ static long do_open(const char *path, u32 flags)
                 o->kind = CACHED_FILE;
                 return (long)(s + FIRST_FD);
             }
-            o->size = card_size(dos, &exists);
+            if (managed) {
+                u32 stat[16];
+                if (FS_SIZE(dos,stat)) return EIO_ERROR;
+                o->size=stat[2]; exists=1;
+            } else o->size = card_size(dos, &exists);
             if (!exists) { cache_note_missing(dos); return ENOENT_ERROR; }
             int f = FS_OPEN(dos, MODE_RDWR, 0);
-            if (f < 0) return ENOENT_ERROR;
+            if (f < 0) return managed ? EIO_ERROR : ENOENT_ERROR;
             /* The whole file in one read, if the cache has room. After a
                failed read, the file reads as without the cache. */
             u32 at = cache.used, len = 0;
             int room = cache.files < CACHE_FILES && slen(dos) < DOS_SIZE && o->size <= CACHE_BYTES - at;
-            if (room && (!o->size || !FS_READ((u32)f, cache.bytes + at, o->size, &len))) {
+            if (room && (!o->size || (!FS_READ((u32)f, cache.bytes + at, o->size, &len) && len==o->size))) {
                 FS_CLOSE((u32)f);
                 c = &cache.file[cache.files++];
                 copy_name(c->dos, dos);
@@ -589,7 +602,7 @@ static long do_open(const char *path, u32 flags)
             if (room) {
                 FS_CLOSE((u32)f);
                 f = FS_OPEN(dos, MODE_RDWR, 0);
-                if (f < 0) return ENOENT_ERROR;
+                if (f < 0) return managed ? EIO_ERROR : ENOENT_ERROR;
             }
             o->fno = (u32)f;
             o->kind = CARD_FILE;

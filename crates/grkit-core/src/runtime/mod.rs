@@ -65,31 +65,47 @@ pub const NATIVE_SETTING_ROWS: usize = 5;
 /// The words of the tail array: the picture scratch, the menu text, and the
 /// live-view labels (`abi::TAIL_SIZE`).
 pub const TAIL_WORDS: usize = crate::abi::TAIL_SIZE / 4;
-// One script array holds the header, every record, the scratch, and the text: at most 65536 words.
+// Every interpreter array must fit its 65536-word allocation limit.
 const _: () = assert!(HEADER_SIZE + MAX_COUNT * RECORD_SIZE <= 65536 * 4);
+const _: () = assert!(MAX_COUNT * RECORD_SIZE <= 65536 * 4);
 const _: () = assert!(TAIL_SIZE <= 65536 * 4);
 const _: () = assert!(PICTURE_SCRATCH.is_multiple_of(4) && TAIL_SIZE.is_multiple_of(4));
 /// One script array holds one icon chunk: 40 slots of at most 6412 bytes stay
 /// below 65536 words.
 pub const MAX_CHUNKS: usize =
-    (MAX_COUNT + HOST_ICON_COUNT + MODULE_TILES_MAX).div_ceil(ICONS_PER_CHUNK);
+    (2 * MAX_COUNT + HOST_ICON_COUNT + MODULE_TILES_MAX).div_ceil(ICONS_PER_CHUNK);
 const _: () = assert!(MAX_CHUNKS <= ICON_CHUNK_SLOTS);
 const _: () = assert!(ICONS_PER_CHUNK * 6412 <= 65536 * 4);
 
 pub fn layout(count: usize) -> Result<Value> {
     ensure!(count <= MAX_COUNT, "Expected 0..{MAX_COUNT} effects");
-    let icon_words: Vec<_> = (0..count + HOST_ICON_COUNT)
+    let icon_words: Vec<_> = (0..2 * MAX_COUNT + HOST_ICON_COUNT)
         .step_by(ICONS_PER_CHUNK)
-        .map(|start| ICONS_PER_CHUNK.min(count + HOST_ICON_COUNT - start) * ICON_STRIDE / 4)
+        .map(|start| ICONS_PER_CHUNK.min(2 * MAX_COUNT + HOST_ICON_COUNT - start) * ICON_STRIDE / 4)
         .collect();
     Ok(
-        json!({"words": (HEADER_SIZE + count * RECORD_SIZE) / 4, "tail_words": TAIL_WORDS, "icon_words": icon_words}),
+        json!({"words": (HEADER_SIZE + MAX_COUNT * RECORD_SIZE) / 4, "tail_words": TAIL_WORDS, "record_bank_words": MAX_COUNT * RECORD_SIZE / 4, "icon_words": icon_words}),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effect_capacity_does_not_move_live_records_or_icons() {
+        let empty = layout(0).unwrap();
+        assert_eq!(empty, layout(1).unwrap());
+        assert_eq!(empty, layout(MAX_COUNT).unwrap());
+        assert_eq!(empty["words"], (HEADER_SIZE + MAX_COUNT * RECORD_SIZE) / 4);
+        assert_eq!(empty["record_bank_words"], MAX_COUNT * RECORD_SIZE / 4);
+        let icons = empty["icon_words"].as_array().unwrap();
+        assert_eq!(
+            icons.iter().map(|n| n.as_u64().unwrap()).sum::<u64>(),
+            ((2 * MAX_COUNT + HOST_ICON_COUNT) * ICON_STRIDE / 4) as u64
+        );
+        assert!(icons.iter().all(|n| n.as_u64().unwrap() <= 65536));
+    }
 
     /// The installer, the module SDK, and the menu agree on the values of a
     /// native settings row.

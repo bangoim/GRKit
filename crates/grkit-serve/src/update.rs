@@ -29,8 +29,14 @@ use grkit_core::{
     runtime::update::{journal, rollback_journal, update_paths, Change},
     Files,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, fs, io::Write, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::{Read, Write},
+    path::PathBuf,
+};
 
 /// The largest package that the service takes: the package limit, and room
 /// for the ZIP structure.
@@ -38,12 +44,154 @@ pub const MAX_PACKAGE: usize = packaging::MAX_TOTAL_SIZE + 8 * 1024 * 1024;
 /// The free space that the card keeps after the update folder.
 const SPARE_BYTES: u64 = 4 * 1024 * 1024;
 
+/// A bounded signed-software identity. Staging metadata and user data are excluded.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SoftwareIdentity {
+    pub digest: String,
+    pub content_hashes: BTreeMap<String, String>,
+}
+
+impl SoftwareIdentity {
+    fn of(files: &Files) -> Self {
+        let content_hashes: BTreeMap<_, _> = files
+            .iter()
+            .filter(|(path, _)| software_owned(path))
+            .map(|(path, bytes)| (path.clone(), packaging::sha256(bytes)))
+            .collect();
+        let digest =
+            packaging::sha256(&serde_json::to_vec(&content_hashes).expect("hashes serialize"));
+        Self {
+            digest,
+            content_hashes,
+        }
+    }
+    fn valid(&self) -> bool {
+        self.content_hashes.len() <= 1024
+            && self
+                .content_hashes
+                .iter()
+                .all(|(path, hash)| path.len() <= 192 && software_owned(path) && valid_hash(hash))
+            && self.digest
+                == packaging::sha256(
+                    &serde_json::to_vec(&self.content_hashes).expect("hashes serialize"),
+                )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SoftwareDomain {
+    Update,
+    Rollback,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SoftwareStatus {
+    Running,
+    Succeeded,
+    Cancelled,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SoftwarePhase {
+    AwaitingConfirmation,
+    AwaitingRestart,
+    Cancelling,
+    Recovering,
+    Completed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SoftwareRequest {
+    pub request_id: String,
+    pub domain: SoftwareDomain,
+    pub boot_id: String,
+    pub card_id: String,
+    pub status: SoftwareStatus,
+    pub phase: SoftwarePhase,
+    pub cancellable: bool,
+    pub expected: SoftwareIdentity,
+    pub before: SoftwareIdentity,
+}
+
+#[derive(Clone, Debug)]
+pub struct SoftwareContext {
+    pub request_id: String,
+    pub boot_id: String,
+    pub card_id: String,
+}
+impl SoftwareContext {
+    fn valid(&self) -> bool {
+        crate::protocol::valid_request_id(&self.request_id)
+            && valid_context_id(&self.boot_id)
+            && valid_context_id(&self.card_id)
+    }
+}
+impl SoftwareRequest {
+    fn valid(&self) -> bool {
+        crate::protocol::valid_request_id(&self.request_id)
+            && valid_context_id(&self.boot_id)
+            && valid_context_id(&self.card_id)
+            && self.expected.valid()
+            && self.before.valid()
+            && match self.status {
+                SoftwareStatus::Succeeded | SoftwareStatus::Cancelled => {
+                    self.phase == SoftwarePhase::Completed && !self.cancellable
+                }
+                SoftwareStatus::Running => {
+                    self.phase != SoftwarePhase::Completed
+                        && (!self.cancellable || self.phase == SoftwarePhase::AwaitingConfirmation)
+                }
+            }
+    }
+}
+fn valid_context_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 128 && value.bytes().all(|c| c.is_ascii_graphic())
+}
+fn valid_hash(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+}
+fn software_owned(path: &str) -> bool {
+    path == STARTUP_FILE || package_owned(path)
+}
+
+const MAX_RECORD_BYTES: usize = 1024 * 1024;
+const MAX_CHECKPOINTS: usize = 16;
+
+/// Append-only software transaction checkpoints share RECORD.JSN. They are not
+/// a generic request history. A newline commits one checksummed JSON frame.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Checkpoint {
+    request: SoftwareRequest,
+    sha256: String,
+}
+impl Checkpoint {
+    fn new(request: SoftwareRequest) -> Self {
+        let sha256 = packaging::sha256(&serde_json::to_vec(&request).expect("request serializes"));
+        Self { request, sha256 }
+    }
+    fn valid(&self) -> bool {
+        self.request.valid()
+            && self.sha256
+                == packaging::sha256(
+                    &serde_json::to_vec(&self.request).expect("request serializes"),
+                )
+    }
+}
+
 /// What the service knows of the camera: the model and the firmware version
 /// that the camera's own HTTP API gives, and the free space of the card.
 pub struct Device {
     pub model: String,
     pub firmware: String,
     pub free_bytes: Option<u64>,
+    pub serial_number: Option<String>,
 }
 
 /// The camera of `model`, a model name of the camera's HTTP API such as
@@ -82,6 +230,10 @@ pub struct Card {
 impl Card {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Card { root: root.into() }
+    }
+
+    pub(crate) fn root(&self) -> &std::path::Path {
+        &self.root
     }
 
     fn path(&self, card_path: &str) -> PathBuf {
@@ -173,9 +325,11 @@ impl Card {
     fn journal_files(&self) -> Result<Vec<&'static str>> {
         let names: Vec<String> = fs::read_dir(self.path(PACKAGE_FOLDER))
             .context(CardNotReady)?
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.file_name().to_string_lossy().to_ascii_uppercase())
-            .collect();
+            .map(|entry| {
+                entry.map(|entry| entry.file_name().to_string_lossy().to_ascii_uppercase())
+            })
+            .collect::<std::io::Result<_>>()
+            .context(CardNotReady)?;
         Ok([JOURNAL_FILE, REQUEST_FILE, DRAFT_FILE, VERSION_FILE]
             .into_iter()
             .filter(|path| names.iter().any(|name| path.ends_with(&format!("/{name}"))))
@@ -212,6 +366,347 @@ impl Card {
     }
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RollbackAvailability {
+    pub available: bool,
+    pub allowed: bool,
+    pub reason: &'static str,
+    pub identity: Option<SoftwareIdentity>,
+    pub version: Option<String>,
+    /// This must come from verified signed target metadata, never a version guess.
+    pub trusted_format_support: Option<Vec<u32>>,
+}
+
+impl Card {
+    fn read_record_bytes(&self) -> Result<Option<Vec<u8>>> {
+        let file = match fs::File::open(self.path(BACKUP_RECORD)) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error).context("Read the software transaction record"),
+        };
+        let mut bytes = Vec::new();
+        file.take(MAX_RECORD_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() <= MAX_RECORD_BYTES,
+            "The software transaction record exceeds its size limit"
+        );
+        Ok(Some(bytes))
+    }
+    fn read_record(&self) -> Result<Option<Record>> {
+        self.read_record_bytes()?
+            .map(|bytes| {
+                Record::parse(&bytes).context("The software transaction record is invalid")
+            })
+            .transpose()
+    }
+    fn append_request(&self, request: SoftwareRequest) -> Result<()> {
+        ensure!(request.valid(), "The software request is invalid");
+        let mut before = self
+            .read_record_bytes()?
+            .context("The software transaction record is missing")?;
+        ensure!(
+            Record::parse(&before).is_some(),
+            "The software transaction record is invalid"
+        );
+        // A torn final append is uncommitted. Truncate only that tail; never
+        // rewrite the complete base record or an acknowledged checkpoint.
+        let complete_length = before
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map(|index| index + 1)
+            .context("The base software record is incomplete")?;
+        before.truncate(complete_length);
+        ensure!(
+            before.iter().filter(|byte| **byte == b'\n').count() <= MAX_CHECKPOINTS,
+            "The software checkpoint limit has been reached"
+        );
+        let mut frame = serde_json::to_vec(&Checkpoint::new(request))?;
+        frame.push(b'\n');
+        ensure!(
+            before.len() + frame.len() <= MAX_RECORD_BYTES,
+            "The software transaction record exceeds its size limit"
+        );
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(self.path(BACKUP_RECORD))?;
+        file.set_len(complete_length as u64)?;
+        file.sync_all()?;
+        file.write_all(&frame)?;
+        file.sync_all()?;
+        drop(file);
+        let after = self
+            .read_record_bytes()?
+            .context("The software transaction record disappeared")?;
+        ensure!(
+            after.len() == before.len() + frame.len()
+                && after.starts_with(&before)
+                && after.ends_with(&frame),
+            "The software checkpoint differs after writing"
+        );
+        Ok(())
+    }
+
+    /// Recover the current/latest request from durable software metadata. A
+    /// missing journal requires complete installed-identity verification. Once a
+    /// terminal outcome is verified, append its checkpoint for later boots.
+    pub fn software_request(&self) -> Result<Option<SoftwareRequest>> {
+        self.ensure_readable()?;
+        let Some(mut request) = self.read_record()?.and_then(|record| record.request) else {
+            return Ok(None);
+        };
+        if request.status != SoftwareStatus::Running {
+            return Ok(Some(request));
+        }
+        match self.state()? {
+            "waiting" => {
+                request.phase = SoftwarePhase::AwaitingConfirmation;
+                request.cancellable = true;
+            }
+            "confirmed" => {
+                request.phase = SoftwarePhase::AwaitingRestart;
+                request.cancellable = false;
+            }
+            _ => {
+                let actual = SoftwareIdentity::of(&self.live_files()?);
+                if actual == request.expected {
+                    request.status = SoftwareStatus::Succeeded;
+                    request.phase = SoftwarePhase::Completed;
+                } else if request.phase == SoftwarePhase::Cancelling && actual == request.before {
+                    request.status = SoftwareStatus::Cancelled;
+                    request.phase = SoftwarePhase::Completed;
+                } else {
+                    request.phase = SoftwarePhase::Recovering;
+                }
+                request.cancellable = false;
+                if request.status != SoftwareStatus::Running {
+                    self.append_request(request.clone())?;
+                }
+            }
+        }
+        Ok(Some(request))
+    }
+
+    /// Cancel only the identified waiting transaction. Never unlink the RTOS's
+    /// confirmed journal, even if confirmation races this request.
+    pub fn cancel_software_request(
+        &self,
+        target_request_id: &str,
+        domain: SoftwareDomain,
+    ) -> Result<SoftwareRequest> {
+        ensure!(
+            crate::protocol::valid_request_id(target_request_id),
+            "Invalid target request ID"
+        );
+        let mut request = self
+            .software_request()?
+            .context("The software request is unknown")?;
+        ensure!(
+            request.request_id.eq_ignore_ascii_case(target_request_id) && request.domain == domain,
+            "The target software request does not match"
+        );
+        if request.status == SoftwareStatus::Cancelled {
+            return Ok(request);
+        }
+        ensure!(
+            request.status == SoftwareStatus::Running && self.state()? == "waiting",
+            "The software request cannot be cancelled"
+        );
+        request.phase = SoftwarePhase::Cancelling;
+        request.cancellable = false;
+        self.append_request(request.clone())?;
+        // Atomic unlink vs the RTOS rename decides who crossed the boundary.
+        ensure!(
+            self.state()? == "waiting",
+            "The camera already confirmed the software request"
+        );
+        fs::remove_file(self.path(REQUEST_FILE))
+            .context("The camera may already have confirmed the software request")?;
+        ensure!(
+            !self.journal_files()?.contains(&JOURNAL_FILE),
+            "The camera already confirmed the software request"
+        );
+        ensure!(
+            SoftwareIdentity::of(&self.live_files()?) == request.before,
+            "Recover changed software before completing cancellation"
+        );
+        request.status = SoftwareStatus::Cancelled;
+        request.phase = SoftwarePhase::Completed;
+        self.append_request(request.clone())?;
+        // The staged content stays for the next update to reclaim. VERSION_FILE
+        // is harmless without a request and does not affect software identity.
+        Ok(request)
+    }
+
+    pub fn rollback_availability(&self) -> Result<RollbackAvailability> {
+        self.rollback_availability_with_keys(&release::OFFICIAL_KEYS)
+    }
+
+    /// A backup version string is not a format proof. Reconstruct the exact
+    /// target from OLD plus unchanged live files, then verify its signed release
+    /// evidence against that complete target before trusting dataFormats.
+    pub fn rollback_availability_with_keys(
+        &self,
+        keys: &[[u8; 32]],
+    ) -> Result<RollbackAvailability> {
+        let rollback = self.rollback()?;
+        let record = self.read_record()?;
+        let identity = if rollback.is_some() {
+            record.as_ref().and_then(|record| record.before.clone())
+        } else {
+            None
+        };
+        let mut availability = RollbackAvailability {
+            available: identity.is_some(),
+            allowed: false,
+            reason: if identity.is_some() {
+                "data_format_incompatible"
+            } else {
+                "backup_unavailable"
+            },
+            identity,
+            version: rollback.and_then(|rollback| rollback.version),
+            trusted_format_support: None,
+        };
+        let Some(record) = record.filter(|_| availability.available) else {
+            return Ok(availability);
+        };
+        let proof = (|| -> Result<release::Statement> {
+            let target = self.rollback_target(&record)?;
+            ensure!(
+                record
+                    .backup
+                    .iter()
+                    .chain(&record.added)
+                    .all(|path| rollback_owned(path)),
+                "The backup contains an unsupported rollback path"
+            );
+            ensure!(
+                availability.identity.as_ref() == Some(&SoftwareIdentity::of(&target)),
+                "The target backup identity changed"
+            );
+            let evidence = target
+                .get(release::CARD_STATEMENT)
+                .context("The target has no signed data-format evidence")?;
+            let signature = target
+                .get(release::CARD_SIGNATURE)
+                .context("The target has no release signature")?;
+            let statement = release::verify(evidence, signature, keys)
+                .context("Verify the target release evidence")?;
+            let mut entries: Files = target
+                .iter()
+                .filter(|(path, _)| rollback_owned(path))
+                .map(|(path, bytes)| (format!("SD_ROOT/{path}"), bytes.clone()))
+                .collect();
+            entries.insert(release::STATEMENT_ENTRY.into(), evidence.clone());
+            entries.insert(release::SIGNATURE_ENTRY.into(), signature.clone());
+            release::check_files(&entries, &statement)
+                .context("Verify the complete rollback target")?;
+            Ok(statement)
+        })();
+        if let Ok(statement) = proof {
+            availability.version = Some(statement.version);
+            if let Some(version) = statement.data_formats.get("lookLibrary") {
+                availability.trusted_format_support = Some(vec![*version]);
+                if *version == crate::library::FORMAT_VERSION {
+                    availability.allowed = true;
+                    availability.reason = "ready";
+                }
+            }
+        }
+        Ok(availability)
+    }
+
+    /// Build the target without writing or consuming its backup. Every restored
+    /// file is checked against the transaction's recorded bytes.
+    fn rollback_target(&self, record: &Record) -> Result<Files> {
+        let mut target = self.live_files()?;
+        for path in &record.added {
+            target.remove(path);
+        }
+        for path in &record.backup {
+            let (_, old) = update_paths(path)?;
+            let bytes = fs::read(self.path(&old)).with_context(|| format!("Read backup {path}"))?;
+            ensure!(
+                record.backup_hashes.get(path) == Some(&packaging::sha256(&bytes)),
+                "The backup content changed: {path}"
+            );
+            target.insert(path.clone(), bytes);
+        }
+        ensure!(
+            record.before.as_ref() == Some(&SoftwareIdentity::of(&target)),
+            "The complete target backup identity changed"
+        );
+        Ok(target)
+    }
+}
+
+pub fn stage_rollback_request(
+    card: &Card,
+    target_identity: &str,
+    context: &SoftwareContext,
+) -> Result<SoftwareRequest> {
+    stage_rollback_request_with_keys(card, target_identity, context, &release::OFFICIAL_KEYS)
+}
+
+pub fn stage_rollback_request_with_keys(
+    card: &Card,
+    target_identity: &str,
+    context: &SoftwareContext,
+    keys: &[[u8; 32]],
+) -> Result<SoftwareRequest> {
+    ensure!(context.valid(), "Invalid software request context");
+    ensure!(
+        card.state()? == "none",
+        "A software request is already pending"
+    );
+    let availability = card.rollback_availability_with_keys(keys)?;
+    let expected = availability
+        .identity
+        .filter(|identity| identity.digest == target_identity)
+        .context("The target backup identity does not match")?;
+    ensure!(
+        availability.allowed,
+        "data_format_incompatible: the backup has no verified compatible data-format support"
+    );
+    // All target/context/proof checks above are read-only. Only a valid rollback
+    // may reconcile and append the previous transaction's terminal checkpoint.
+    if let Some(previous) = card.software_request()? {
+        ensure!(
+            previous.status != SoftwareStatus::Running,
+            "Recover the previous software request before rolling back"
+        );
+    }
+    let before = SoftwareIdentity::of(&card.live_files()?);
+    ensure!(
+        before != expected,
+        "The current software already matches the rollback target"
+    );
+    let rollback = card
+        .rollback()?
+        .context("The target backup changed before staging")?;
+    let request = SoftwareRequest {
+        request_id: context.request_id.to_ascii_lowercase(),
+        domain: SoftwareDomain::Rollback,
+        boot_id: context.boot_id.clone(),
+        card_id: context.card_id.clone(),
+        status: SoftwareStatus::Running,
+        phase: SoftwarePhase::AwaitingConfirmation,
+        cancellable: true,
+        expected,
+        before,
+    };
+    stage_rollback_inner(
+        card,
+        rollback,
+        availability.version.as_deref(),
+        Some(&request),
+    )?;
+    card.software_request()?
+        .context("The rollback request was not retained")
+}
+
 /// The record of an update (`BACKUP_RECORD`), which the service writes with
 /// the backup folder.
 #[derive(Debug, PartialEq)]
@@ -224,6 +719,9 @@ struct Record {
     added: Vec<String>,
     /// The files that the update replaced or removed: the backup.
     backup: Vec<String>,
+    backup_hashes: BTreeMap<String, String>,
+    before: Option<SoftwareIdentity>,
+    request: Option<SoftwareRequest>,
 }
 
 impl Record {
@@ -233,6 +731,9 @@ impl Record {
             installed: BTreeMap::new(),
             added: Vec::new(),
             backup: Vec::new(),
+            backup_hashes: BTreeMap::new(),
+            before: Some(SoftwareIdentity::of(live)),
+            request: None,
         };
         for change in changes {
             match change {
@@ -249,6 +750,13 @@ impl Record {
                 Change::Remove(path) => record.backup.push(path.clone()),
             }
         }
+        for path in &record.backup {
+            if let Some(bytes) = live.get(path) {
+                record
+                    .backup_hashes
+                    .insert(path.clone(), packaging::sha256(bytes));
+            }
+        }
         record
     }
 
@@ -258,13 +766,24 @@ impl Record {
             "installed": self.installed,
             "added": self.added,
             "backup": self.backup,
+            "backupHashes": self.backup_hashes,
+            "before": self.before,
+            "request": self.request,
         })
         .to_string()
         .into_bytes()
+        .into_iter()
+        .chain(*b"\n")
+        .collect()
     }
 
     fn parse(bytes: &[u8]) -> Option<Record> {
-        let value: Value = serde_json::from_slice(bytes).ok()?;
+        if bytes.len() > MAX_RECORD_BYTES {
+            return None;
+        }
+        let mut lines = bytes.split_inclusive(|byte| *byte == b'\n');
+        let base = lines.next()?;
+        let value: Value = grkit_core::effects::parse_json(base).ok()?;
         let paths = |key: &str| -> Option<Vec<String>> {
             value[key]
                 .as_array()?
@@ -272,7 +791,7 @@ impl Record {
                 .map(|path| path.as_str().map(str::to_owned))
                 .collect()
         };
-        Some(Record {
+        let mut record = Record {
             version: value["version"].as_str().map(str::to_owned),
             installed: value["installed"]
                 .as_object()?
@@ -281,7 +800,44 @@ impl Record {
                 .collect::<Option<_>>()?,
             added: paths("added")?,
             backup: paths("backup")?,
-        })
+            backup_hashes: serde_json::from_value(
+                value
+                    .get("backupHashes")
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+            )
+            .ok()?,
+            before: serde_json::from_value(value.get("before").cloned().unwrap_or(Value::Null))
+                .ok()?,
+            request: serde_json::from_value(value.get("request").cloned().unwrap_or(Value::Null))
+                .ok()?,
+        };
+        if record
+            .request
+            .as_ref()
+            .is_some_and(|request| !request.valid())
+            || record
+                .before
+                .as_ref()
+                .is_some_and(|identity| !identity.valid())
+        {
+            return None;
+        }
+        for (index, line) in lines.enumerate() {
+            if index >= MAX_CHECKPOINTS {
+                return None;
+            }
+            // A torn append never replaces the previous complete request state.
+            if !line.ends_with(b"\n") {
+                break;
+            }
+            let checkpoint: Checkpoint = serde_json::from_slice(line).ok()?;
+            if !checkpoint.valid() {
+                return None;
+            }
+            record.request = Some(checkpoint.request);
+        }
+        Some(record)
     }
 }
 
@@ -312,22 +868,43 @@ impl Card {
         if self.state()? != "none" {
             return Ok(None);
         }
-        let Ok(bytes) = fs::read(self.path(BACKUP_RECORD)) else {
+        let Some(record) = self.read_record()? else {
             return Ok(None);
         };
-        let Some(record) = Record::parse(&bytes) else {
+        if record.installed.is_empty() && record.backup.is_empty() && record.added.is_empty() {
             return Ok(None);
-        };
-        let backed_up = record
-            .backup
-            .iter()
-            .all(|path| update_paths(path).is_ok_and(|(_, old)| self.path(&old).is_file()));
+        }
+        let backed_up = record.backup.iter().all(|path| {
+            update_paths(path).is_ok_and(|(_, old)| {
+                fs::read(self.path(&old)).is_ok_and(|bytes| {
+                    record
+                        .backup_hashes
+                        .get(path)
+                        .is_some_and(|hash| packaging::sha256(&bytes) == *hash)
+                })
+            })
+        });
         let live = self.live_files()?;
         let unchanged = record.installed.iter().all(|(path, hash)| {
             live.get(path)
                 .is_some_and(|bytes| packaging::sha256(bytes) == *hash)
         });
-        Ok((backed_up && unchanged).then(|| Rollback {
+        let mut target = live;
+        for path in &record.added {
+            target.remove(path);
+        }
+        for path in &record.backup {
+            if let Ok((_, old)) = update_paths(path) {
+                if let Ok(bytes) = fs::read(self.path(&old)) {
+                    target.insert(path.clone(), bytes);
+                }
+            }
+        }
+        let complete = record
+            .before
+            .as_ref()
+            .is_some_and(|expected| SoftwareIdentity::of(&target) == *expected);
+        Ok((backed_up && unchanged && complete).then(|| Rollback {
             version: record.version,
             changes: record
                 .backup
@@ -336,6 +913,22 @@ impl Card {
                 .chain(record.added.into_iter().map(Change::Remove))
                 .collect(),
         }))
+    }
+
+    /// Actual installed bytes, including the startup script. The content
+    /// identity changes even when two builds have the same version label.
+    pub fn inventory(&self) -> Result<Value> {
+        let files = self.live_files()?;
+        let hashes: std::collections::BTreeMap<_, _> = files
+            .iter()
+            .filter(|(path, _)| software_owned(path))
+            .map(|(path, bytes)| (path, packaging::sha256(bytes)))
+            .collect();
+        let backup = self
+            .rollback()?
+            .map(|value| json!({"version": value.version}));
+        Ok(json!({"package": self.package()?, "contentHashes": hashes,
+            "state": self.state()?, "backup": backup}))
     }
 
     /// The installed package: its GRKit version, the module IDs and effect
@@ -383,9 +976,27 @@ pub fn stage_rollback(card: &Card) -> Result<Value> {
     let rollback = card
         .rollback()?
         .context("The card has no update to roll back")?;
+    let version = rollback.version.clone();
+    stage_rollback_inner(card, rollback, version.as_deref(), None)
+}
+
+fn stage_rollback_inner(
+    card: &Card,
+    rollback: Rollback,
+    version: Option<&str>,
+    request: Option<&SoftwareRequest>,
+) -> Result<Value> {
+    let journal = rollback_journal(&rollback.changes)?;
+    card.warm([VERSION_FILE, DRAFT_FILE, REQUEST_FILE]);
     card.clear(UPDATE_FOLDER)?;
-    card.write_checked(VERSION_FILE, &version_digits(rollback.version.as_deref()))?;
-    card.write_checked(DRAFT_FILE, &rollback_journal(&rollback.changes)?)?;
+    card.write_checked(VERSION_FILE, &version_digits(version))?;
+    card.write_checked(DRAFT_FILE, &journal)?;
+    // Persist and read back the transaction identity before the camera can see
+    // REQUEST_FILE. A power failure here leaves recoveryRequired, never an
+    // unassociated confirmation prompt or an invented terminal success.
+    if let Some(request) = request {
+        card.append_request(request.clone())?;
+    }
     fs::rename(card.path(DRAFT_FILE), card.path(REQUEST_FILE)).context("Write the journal")?;
     ensure!(card.state()? == "waiting", "The journal is not on the card");
     let installs = rollback
@@ -393,12 +1004,15 @@ pub fn stage_rollback(card: &Card) -> Result<Value> {
         .iter()
         .filter(|change| matches!(change, Change::Install(_)))
         .count();
-    Ok(json!({
-        "state": "waiting",
-        "version": rollback.version,
-        "install": installs,
-        "remove": rollback.changes.len() - installs,
-    }))
+    Ok(
+        json!({"state":"waiting","version":version,"install":installs,"remove":rollback.changes.len()-installs}),
+    )
+}
+
+fn rollback_owned(path: &str) -> bool {
+    software_owned(path)
+        || path == grkit_core::card::IMPORTS_FILE
+        || path == packaging::RECIPES_PACKAGE_PATH
 }
 
 /// Whether the camera puts a card file of `path` there with each package.
@@ -406,7 +1020,14 @@ pub fn stage_rollback(card: &Card) -> Result<Value> {
 /// the runtime files, the modules, and the package effects. Other files of
 /// the package folder, such as the import library of the site, stay.
 fn package_owned(path: &str) -> bool {
-    if packaging::is_runtime_path(path) {
+    if path == PACKAGE_LIST {
+        return true;
+    }
+    if matches!(
+        path,
+        "SCRIPT/GRKIT/RELEASE.JSN" | "SCRIPT/GRKIT/RELEASE.SIG"
+    ) || packaging::is_runtime_path(path)
+    {
         return true;
     }
     let Some(rest) = path
@@ -482,6 +1103,39 @@ fn version_digits(version: Option<&str>) -> Vec<u8> {
 /// Checks the package `zip` for `device`, writes its changes to the update
 /// folder, and writes the journal. Returns what the update does.
 pub fn stage(card: &Card, zip: &[u8], device: &Device, keys: &[[u8; 32]]) -> Result<Value> {
+    stage_inner(card, zip, device, keys, None)
+}
+
+pub fn stage_request(
+    card: &Card,
+    zip: &[u8],
+    device: &Device,
+    keys: &[[u8; 32]],
+    context: &SoftwareContext,
+) -> Result<SoftwareRequest> {
+    ensure!(context.valid(), "Invalid software request context");
+    ensure!(
+        card.state()? == "none",
+        "A software request is already pending"
+    );
+    if let Some(previous) = card.software_request()? {
+        ensure!(
+            previous.status != SoftwareStatus::Running,
+            "Recover the previous software request before writing"
+        );
+    }
+    stage_inner(card, zip, device, keys, Some(context))?;
+    card.software_request()?
+        .context("The software request was not retained")
+}
+
+fn stage_inner(
+    card: &Card,
+    zip: &[u8],
+    device: &Device,
+    keys: &[[u8; 32]],
+    context: Option<&SoftwareContext>,
+) -> Result<Value> {
     ensure!(zip.len() <= MAX_PACKAGE, "The package is too large");
     let (update, files) = release::verify_update(zip, keys).context("Check the package")?;
     check_camera(update.statement.camera, device)?;
@@ -498,7 +1152,32 @@ pub fn stage(card: &Card, zip: &[u8], device: &Device, keys: &[[u8; 32]]) -> Res
     if let Some(startup) = &live_startup {
         before.insert(STARTUP_FILE.to_owned(), startup.clone());
     }
-    let record = Record::of(&changes, &before, &new, version_of(&live));
+    let mut record = Record::of(&changes, &before, &new, version_of(&live));
+    if let Some(context) = context {
+        record.request = Some(SoftwareRequest {
+            request_id: context.request_id.to_ascii_lowercase(),
+            domain: SoftwareDomain::Update,
+            boot_id: context.boot_id.clone(),
+            card_id: context.card_id.clone(),
+            status: if changes.is_empty() {
+                SoftwareStatus::Succeeded
+            } else {
+                SoftwareStatus::Running
+            },
+            phase: if changes.is_empty() {
+                SoftwarePhase::Completed
+            } else {
+                SoftwarePhase::AwaitingConfirmation
+            },
+            cancellable: !changes.is_empty(),
+            expected: SoftwareIdentity::of(&new),
+            before: SoftwareIdentity::of(&before),
+        });
+        ensure!(
+            record.to_bytes().len() <= MAX_RECORD_BYTES,
+            "The software request record is too large"
+        );
+    }
     let staged: Vec<(String, &Vec<u8>)> = changes
         .iter()
         .filter_map(|change| match change {
@@ -532,6 +1211,13 @@ pub fn stage(card: &Card, zip: &[u8], device: &Device, keys: &[[u8; 32]]) -> Res
     if changes.is_empty() {
         // The backup of the last update stays, for a rollback.
         card.clear(UPDATE_FOLDER)?;
+        if let Some(request) = record.request.clone() {
+            if card.read_record()?.is_some() {
+                card.append_request(request)?;
+            } else {
+                card.write_checked(BACKUP_RECORD, &record.to_bytes())?;
+            }
+        }
         return Ok(summary("none", 0));
     }
     card.warm(
@@ -589,6 +1275,56 @@ mod tests {
         testing::signed_package(&camera::GR3, "1.7.0", effects)
     }
 
+    fn compatible_package(version: &str, effects: &[&str], format: Option<u32>) -> Vec<u8> {
+        let runtimes = testing::release_runtimes(&camera::GR3, version);
+        let modules = testing::official_modules();
+        let mut statement =
+            release::Statement::of_release(&runtimes, &modules, &camera::GR3).unwrap();
+        statement.data_formats.clear();
+        if let Some(version) = format {
+            statement.data_formats.insert("lookLibrary".into(), version);
+        }
+        let statement = statement.to_bytes().unwrap();
+        let signature = release::SigningKey::from_hex(testing::RELEASE_SEED)
+            .unwrap()
+            .sign(&statement);
+        packaging::assemble_with(
+            &runtimes,
+            &testing::effect_set(effects),
+            &modules,
+            &camera::GR3,
+            &packaging::Guide {
+                language: grkit_core::language::Language::English,
+                pdf: b"%PDF-1.7\n% test guide\n",
+            },
+            packaging::Extras {
+                release: Some((&statement, &signature)),
+                ..packaging::Extras::default()
+            },
+        )
+        .unwrap()
+        .bytes
+    }
+
+    fn card_snapshot(card: &Card) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut pending = vec![card.root.clone()];
+        let mut files = BTreeMap::new();
+        while let Some(directory) = pending.pop() {
+            for entry in fs::read_dir(directory).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    pending.push(entry.path());
+                } else {
+                    files.insert(
+                        entry.path().strip_prefix(&card.root).unwrap().to_owned(),
+                        fs::read(entry.path()).unwrap(),
+                    );
+                }
+            }
+        }
+        files
+    }
+
     fn keys() -> [[u8; 32]; 1] {
         [testing::release_key()]
     }
@@ -598,6 +1334,7 @@ mod tests {
             model: "RICOH GR III".into(),
             firmware: "2.21".into(),
             free_bytes: Some(1 << 30),
+            serial_number: Some("test-camera".into()),
         }
     }
 
@@ -615,6 +1352,521 @@ mod tests {
 
     fn read(card: &Card, path: &str) -> Option<Vec<u8>> {
         fs::read(card.path(path)).ok()
+    }
+
+    fn request_context() -> SoftwareContext {
+        SoftwareContext {
+            request_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+            boot_id: "service-boot".into(),
+            card_id: "card-identity".into(),
+        }
+    }
+
+    #[test]
+    fn request_survives_restart_and_success_requires_installed_hashes() {
+        let (dir, card) = card_with(&package(&["first"]));
+        let next = package(&["second"]); // Deliberately the same version.
+        let request = stage_request(&card, &next, &gr3(), &keys(), &request_context()).unwrap();
+        assert_eq!(request.status, SoftwareStatus::Running);
+        assert_eq!(request.phase, SoftwarePhase::AwaitingConfirmation);
+        assert!(request.cancellable);
+        assert_ne!(request.expected, request.before);
+        assert_eq!(
+            Card::new(dir.path())
+                .software_request()
+                .unwrap()
+                .unwrap()
+                .request_id,
+            request.request_id
+        );
+        fs::rename(card.path(REQUEST_FILE), card.path(JOURNAL_FILE)).unwrap();
+        assert_eq!(
+            card.software_request().unwrap().unwrap().phase,
+            SoftwarePhase::AwaitingRestart
+        );
+        fs::rename(card.path(JOURNAL_FILE), card.path(REQUEST_FILE)).unwrap();
+        run_journal(&card);
+        let complete = card.software_request().unwrap().unwrap();
+        assert_eq!(complete.status, SoftwareStatus::Succeeded);
+        assert_eq!(
+            complete.expected,
+            SoftwareIdentity::of(&card.live_files().unwrap())
+        );
+        assert_eq!(
+            Card::new(dir.path()).software_request().unwrap().unwrap(),
+            complete
+        );
+        assert!(!complete
+            .expected
+            .content_hashes
+            .keys()
+            .any(|path| path.contains("COMMIT.")));
+    }
+
+    #[test]
+    fn lost_journal_does_not_claim_success_or_accept_another_update() {
+        let (_dir, card) = card_with(&package(&["first"]));
+        stage_request(
+            &card,
+            &package(&["second"]),
+            &gr3(),
+            &keys(),
+            &request_context(),
+        )
+        .unwrap();
+        fs::remove_file(card.path(REQUEST_FILE)).unwrap();
+        let recovered = card.software_request().unwrap().unwrap();
+        assert_eq!(recovered.status, SoftwareStatus::Running);
+        assert_eq!(recovered.phase, SoftwarePhase::Recovering);
+        assert!(!recovered.cancellable);
+        assert!(stage_request(
+            &card,
+            &package(&["third"]),
+            &gr3(),
+            &keys(),
+            &request_context()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn cancellation_is_targeted_durable_and_cannot_remove_a_confirmed_journal() {
+        let (dir, card) = card_with(&package(&["first"]));
+        let ctx = request_context();
+        stage_request(&card, &package(&["second"]), &gr3(), &keys(), &ctx).unwrap();
+        assert!(card
+            .cancel_software_request(
+                "650e8400-e29b-41d4-a716-446655440000",
+                SoftwareDomain::Update
+            )
+            .is_err());
+        assert!(card
+            .cancel_software_request(&ctx.request_id, SoftwareDomain::Rollback)
+            .is_err());
+        assert_eq!(card.state().unwrap(), "waiting");
+        fs::rename(card.path(REQUEST_FILE), card.path(JOURNAL_FILE)).unwrap();
+        assert!(card
+            .cancel_software_request(&ctx.request_id, SoftwareDomain::Update)
+            .is_err());
+        assert!(card.path(JOURNAL_FILE).is_file());
+        fs::rename(card.path(JOURNAL_FILE), card.path(REQUEST_FILE)).unwrap();
+        let cancelled = card
+            .cancel_software_request(&ctx.request_id, SoftwareDomain::Update)
+            .unwrap();
+        assert_eq!(cancelled.status, SoftwareStatus::Cancelled);
+        assert_eq!(card.state().unwrap(), "none");
+        assert_eq!(
+            Card::new(dir.path()).software_request().unwrap().unwrap(),
+            cancelled
+        );
+        assert_eq!(
+            card.cancel_software_request(&ctx.request_id, SoftwareDomain::Update)
+                .unwrap(),
+            cancelled
+        );
+    }
+
+    #[test]
+    fn interrupted_cancellation_recovers_without_overwriting_the_backup_record() {
+        let (dir, card) = card_with(&package(&["first"]));
+        let ctx = request_context();
+        let mut request =
+            stage_request(&card, &package(&["second"]), &gr3(), &keys(), &ctx).unwrap();
+        request.phase = SoftwarePhase::Cancelling;
+        request.cancellable = false;
+        card.append_request(request).unwrap();
+        fs::remove_file(card.path(REQUEST_FILE)).unwrap();
+        let before = card.read_record_bytes().unwrap().unwrap();
+        // A torn terminal checkpoint is ignored, then safely truncated when
+        // recovery appends its verified terminal outcome.
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(card.path(BACKUP_RECORD))
+            .unwrap();
+        file.write_all(b"{\"request\":").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let result = Card::new(dir.path()).software_request().unwrap().unwrap();
+        assert_eq!(result.status, SoftwareStatus::Cancelled);
+        assert!(card
+            .read_record_bytes()
+            .unwrap()
+            .unwrap()
+            .starts_with(&before));
+    }
+
+    #[test]
+    fn compatible_signed_rollback_retains_its_request_and_restores_exact_identity() {
+        let first = compatible_package("1.7.0", &["first"], Some(1));
+        let (dir, card) = card_with(&first);
+        let original = SoftwareIdentity::of(&card.live_files().unwrap());
+        let personal = card.path("GRKIT/EFFECTS/CUSTOM.GRF");
+        fs::create_dir_all(personal.parent().unwrap()).unwrap();
+        fs::write(&personal, b"personal content").unwrap();
+        // Package journals must preserve the entire activated library, including
+        // official removal identities and immutable custom content generations.
+        let content = testing::effect("custom");
+        let hash = packaging::sha256(&content);
+        let mut manifest = crate::library::Manifest::default();
+        let custom = crate::library::Entry {
+            name: "Test".into(),
+            content_hash: hash.clone(),
+            enabled: true,
+            origin: crate::library::Origin::Custom,
+            removed: false,
+            features: 0,
+            monochrome: false,
+        };
+        manifest.entries.insert("custom".into(), custom.clone());
+        manifest.order.push("custom".into());
+        manifest.entries.insert(
+            "first".into(),
+            crate::library::Entry {
+                enabled: false,
+                removed: true,
+                origin: crate::library::Origin::Official,
+                content_hash: packaging::sha256(&testing::effect("first")),
+                ..custom
+            },
+        );
+        let payload = manifest.encode_binary().unwrap();
+        let crc = crc32fast::hash(&payload);
+        let mut slot = vec![0u8; 32768];
+        slot[..8].copy_from_slice(b"GRKSLOT1");
+        for (offset, value) in [(8, 1u32), (12, payload.len() as u32), (16, crc), (24, 1)] {
+            slot[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        let header_crc = crc32fast::hash(&slot[..32]);
+        slot[20..24].copy_from_slice(&header_crc.to_le_bytes());
+        slot[32..32 + payload.len()].copy_from_slice(&payload);
+        for (offset, value) in [(32752, 0x54494d43u32), (32756, 1), (32760, crc)] {
+            slot[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        let commit_crc = crc32fast::hash(&slot[32752..]);
+        slot[32764..].copy_from_slice(&commit_crc.to_le_bytes());
+        let mut activation = vec![0u8; 32];
+        activation[..8].copy_from_slice(b"GRKACT01");
+        for (offset, value) in [(8, 1u32), (12, 1), (16, crc)] {
+            activation[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        let activation_crc = crc32fast::hash(&activation);
+        activation[24..28].copy_from_slice(&activation_crc.to_le_bytes());
+        let library_files = BTreeMap::from([
+            ("GRKIT/LIB0.BIN".to_owned(), slot),
+            ("GRKIT/LIB1.BIN".to_owned(), vec![0u8; 32768]),
+            ("GRKIT/LIB.ACT".to_owned(), activation),
+            (
+                format!("GRKIT/CONTENT/{}.GRF", hash[..8].to_uppercase()),
+                content,
+            ),
+        ]);
+        for (name, bytes) in &library_files {
+            let path = card.path(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        }
+        let assert_library_preserved = || {
+            for (name, bytes) in &library_files {
+                assert_eq!(fs::read(card.path(name)).unwrap(), *bytes, "{name}");
+            }
+        };
+        let ctx = request_context();
+        let update = stage_request(
+            &card,
+            &compatible_package("1.8.0", &["second"], Some(1)),
+            &gr3(),
+            &keys(),
+            &ctx,
+        )
+        .unwrap();
+        run_journal(&card);
+        assert_library_preserved();
+        let availability = card.rollback_availability_with_keys(&keys()).unwrap();
+        assert!(availability.available && availability.allowed);
+        assert_eq!(availability.reason, "ready");
+        assert_eq!(availability.trusted_format_support, Some(vec![1]));
+        assert_eq!(availability.identity.as_ref(), Some(&original));
+        let mut rollback_context = ctx;
+        rollback_context.request_id = "650e8400-e29b-41d4-a716-446655440000".into();
+        let rollback =
+            stage_rollback_request_with_keys(&card, &original.digest, &rollback_context, &keys())
+                .unwrap();
+        assert_eq!(rollback.domain, SoftwareDomain::Rollback);
+        assert_eq!(rollback.expected, original);
+        assert_eq!(rollback.before, update.expected);
+        assert_eq!(rollback.phase, SoftwarePhase::AwaitingConfirmation);
+        assert_eq!(
+            Card::new(dir.path()).software_request().unwrap().unwrap(),
+            rollback
+        );
+        // The durable link exists while REQUEST is visible to the camera.
+        assert_eq!(
+            card.read_record().unwrap().unwrap().request.as_ref(),
+            Some(&rollback)
+        );
+        assert!(card.path(REQUEST_FILE).exists());
+        fs::rename(card.path(REQUEST_FILE), card.path(JOURNAL_FILE)).unwrap();
+        assert_eq!(
+            card.software_request().unwrap().unwrap().phase,
+            SoftwarePhase::AwaitingRestart
+        );
+        assert!(card
+            .cancel_software_request(&rollback.request_id, SoftwareDomain::Rollback)
+            .is_err());
+        fs::rename(card.path(JOURNAL_FILE), card.path(REQUEST_FILE)).unwrap();
+        run_journal(&card);
+        let completed = Card::new(dir.path()).software_request().unwrap().unwrap();
+        assert_eq!(completed.status, SoftwareStatus::Succeeded);
+        assert_eq!(
+            completed.expected,
+            SoftwareIdentity::of(&card.live_files().unwrap())
+        );
+        assert_eq!(completed.expected, original);
+        assert_eq!(fs::read(personal).unwrap(), b"personal content");
+        assert_library_preserved();
+        assert_eq!(
+            Card::new(dir.path()).software_request().unwrap().unwrap(),
+            completed
+        );
+        assert!(
+            !card
+                .rollback_availability_with_keys(&keys())
+                .unwrap()
+                .available
+        );
+    }
+
+    #[test]
+    fn compatible_rollback_can_be_cancelled_and_restarted_without_losing_backup() {
+        let (dir, card) = card_with(&compatible_package("1.7.0", &["first"], Some(1)));
+        let mut ctx = request_context();
+        stage_request(
+            &card,
+            &compatible_package("1.8.0", &["second"], Some(1)),
+            &gr3(),
+            &keys(),
+            &ctx,
+        )
+        .unwrap();
+        run_journal(&card);
+        let target = card
+            .rollback_availability_with_keys(&keys())
+            .unwrap()
+            .identity
+            .unwrap();
+        ctx.request_id = "650e8400-e29b-41d4-a716-446655440000".into();
+        let request =
+            stage_rollback_request_with_keys(&card, &target.digest, &ctx, &keys()).unwrap();
+        let before = request.before.clone();
+        assert!(card
+            .cancel_software_request(&ctx.request_id, SoftwareDomain::Update)
+            .is_err());
+        let cancelled = card
+            .cancel_software_request(&ctx.request_id, SoftwareDomain::Rollback)
+            .unwrap();
+        assert_eq!(cancelled.status, SoftwareStatus::Cancelled);
+        assert_eq!(SoftwareIdentity::of(&card.live_files().unwrap()), before);
+        assert_eq!(
+            Card::new(dir.path()).software_request().unwrap().unwrap(),
+            cancelled
+        );
+        assert!(
+            card.rollback_availability_with_keys(&keys())
+                .unwrap()
+                .allowed
+        );
+        ctx.request_id = "750e8400-e29b-41d4-a716-446655440000".into();
+        stage_rollback_request_with_keys(&card, &target.digest, &ctx, &keys()).unwrap();
+        fs::remove_file(card.path(REQUEST_FILE)).unwrap();
+        let uncertain = Card::new(dir.path()).software_request().unwrap().unwrap();
+        assert_eq!(uncertain.status, SoftwareStatus::Running);
+        assert_eq!(uncertain.phase, SoftwarePhase::Recovering);
+        assert!(!uncertain.cancellable);
+        let unchanged = card_snapshot(&card);
+        ctx.request_id = "850e8400-e29b-41d4-a716-446655440000".into();
+        assert!(stage_rollback_request_with_keys(&card, &target.digest, &ctx, &keys()).is_err());
+        assert_eq!(card_snapshot(&card), unchanged);
+    }
+
+    #[test]
+    fn stale_target_unknown_keys_and_unsupported_formats_are_rejected_before_writes() {
+        for format in [None, Some(1), Some(2)] {
+            let (_dir, card) = card_with(&compatible_package("1.7.0", &["first"], format));
+            stage_request(
+                &card,
+                &compatible_package("1.8.0", &["second"], Some(1)),
+                &gr3(),
+                &keys(),
+                &request_context(),
+            )
+            .unwrap();
+            run_journal(&card);
+            let target = card
+                .rollback_availability_with_keys(&keys())
+                .unwrap()
+                .identity
+                .unwrap();
+            let before = card_snapshot(&card);
+            assert!(stage_rollback_request_with_keys(
+                &card,
+                &"0".repeat(64),
+                &request_context(),
+                &keys()
+            )
+            .is_err());
+            assert_eq!(card_snapshot(&card), before);
+            assert!(!card.rollback_availability().unwrap().allowed);
+            assert!(stage_rollback_request(&card, &target.digest, &request_context()).is_err());
+            assert_eq!(card_snapshot(&card), before);
+            if format != Some(1) {
+                let availability = card.rollback_availability_with_keys(&keys()).unwrap();
+                assert!(!availability.allowed);
+                assert_eq!(
+                    availability.trusted_format_support,
+                    format.map(|value| vec![value])
+                );
+                assert!(stage_rollback_request_with_keys(
+                    &card,
+                    &target.digest,
+                    &request_context(),
+                    &keys()
+                )
+                .is_err());
+                assert_eq!(card_snapshot(&card), before);
+            }
+        }
+    }
+
+    #[test]
+    fn unchanged_live_release_evidence_can_prove_the_rollback_target() {
+        // Only the selected GRF/list differs. Both releases have byte-identical
+        // runtime evidence, so that evidence stays live instead of in OLD.
+        let (_dir, card) = card_with(&compatible_package("1.7.0", &["first"], Some(1)));
+        stage_request(
+            &card,
+            &compatible_package("1.7.0", &["second"], Some(1)),
+            &gr3(),
+            &keys(),
+            &request_context(),
+        )
+        .unwrap();
+        run_journal(&card);
+        let record = card.read_record().unwrap().unwrap();
+        assert!(!record.backup.contains(&release::CARD_STATEMENT.to_owned()));
+        assert!(!record.backup.contains(&release::CARD_SIGNATURE.to_owned()));
+        let target = card.rollback_availability_with_keys(&keys()).unwrap();
+        assert!(target.allowed);
+        let mut ctx = request_context();
+        ctx.request_id = "650e8400-e29b-41d4-a716-446655440000".into();
+        stage_rollback_request_with_keys(&card, &target.identity.unwrap().digest, &ctx, &keys())
+            .unwrap();
+        run_journal(&card);
+        assert_eq!(
+            card.software_request().unwrap().unwrap().status,
+            SoftwareStatus::Succeeded
+        );
+    }
+
+    #[test]
+    fn target_proof_must_match_runtime_even_if_unsigned_record_is_rewritten() {
+        for tamper_signature in [false, true] {
+            let (_dir, card) = card_with(&compatible_package("1.7.0", &["first"], Some(1)));
+            stage_request(
+                &card,
+                &compatible_package("1.8.0", &["second"], Some(1)),
+                &gr3(),
+                &keys(),
+                &request_context(),
+            )
+            .unwrap();
+            run_journal(&card);
+            let mut record = card.read_record().unwrap().unwrap();
+            // Either substitute genuine evidence for the wrong runtime, or alter
+            // the target statement while retaining its original signature. Rewrite
+            // every unsigned hash so only verification of signed evidence catches it.
+            for path in [release::CARD_STATEMENT, release::CARD_SIGNATURE] {
+                let (_, old) = update_paths(path).unwrap();
+                let bytes = if tamper_signature {
+                    let original = fs::read(card.path(&old)).unwrap();
+                    if path == release::CARD_STATEMENT {
+                        let mut value: serde_json::Value =
+                            serde_json::from_slice(&original).unwrap();
+                        value["version"] = "9.9.9".into();
+                        serde_json::to_vec(&value).unwrap()
+                    } else {
+                        original
+                    }
+                } else {
+                    fs::read(card.path(path)).unwrap()
+                };
+                fs::write(card.path(&old), &bytes).unwrap();
+                record
+                    .backup_hashes
+                    .insert(path.into(), packaging::sha256(&bytes));
+            }
+            let mut target = card.live_files().unwrap();
+            for path in &record.added {
+                target.remove(path);
+            }
+            for path in &record.backup {
+                let (_, old) = update_paths(path).unwrap();
+                target.insert(path.clone(), fs::read(card.path(&old)).unwrap());
+            }
+            record.before = Some(SoftwareIdentity::of(&target));
+            fs::write(card.path(BACKUP_RECORD), record.to_bytes()).unwrap();
+            let availability = card.rollback_availability_with_keys(&keys()).unwrap();
+            assert!(availability.available);
+            assert!(!availability.allowed);
+            assert!(availability.trusted_format_support.is_none());
+            let before = card_snapshot(&card);
+            assert!(stage_rollback_request_with_keys(
+                &card,
+                &availability.identity.unwrap().digest,
+                &request_context(),
+                &keys()
+            )
+            .is_err());
+            assert_eq!(card_snapshot(&card), before);
+        }
+    }
+
+    #[test]
+    fn rollback_reports_identity_but_blocks_unknown_format_support_before_writing() {
+        let (_dir, card) = card_with(&package(&["first"]));
+        let ctx = request_context();
+        stage_request(&card, &package(&["second"]), &gr3(), &keys(), &ctx).unwrap();
+        run_journal(&card);
+        let state = card.rollback_availability().unwrap();
+        assert!(state.available);
+        assert!(!state.allowed);
+        assert_eq!(state.reason, "data_format_incompatible");
+        let identity = state.identity.unwrap();
+        assert!(stage_rollback_request(&card, &identity.digest, &ctx).is_err());
+        assert_eq!(card.state().unwrap(), "none");
+        assert!(!card.path(REQUEST_FILE).exists());
+        let record = card.read_record().unwrap().unwrap();
+        let (_, old) = update_paths(&record.backup[0]).unwrap();
+        fs::write(card.path(&old), b"tampered").unwrap();
+        assert!(!card.rollback_availability().unwrap().available);
+    }
+
+    #[test]
+    fn noop_request_keeps_the_existing_backup_and_invalid_context_writes_nothing() {
+        let (_dir, card) = card_with(&package(&["first"]));
+        let mut invalid = request_context();
+        invalid.request_id = "not-a-uuid".into();
+        assert!(stage_request(&card, &package(&["second"]), &gr3(), &keys(), &invalid).is_err());
+        assert!(!card.path(BACKUP_RECORD).exists());
+        let next = package(&["second"]);
+        stage_request(&card, &next, &gr3(), &keys(), &request_context()).unwrap();
+        run_journal(&card);
+        let backup = card.rollback_availability().unwrap().identity;
+        let mut second = request_context();
+        second.request_id = "650e8400-e29b-41d4-a716-446655440000".into();
+        let noop = stage_request(&card, &next, &gr3(), &keys(), &second).unwrap();
+        assert_eq!(noop.status, SoftwareStatus::Succeeded);
+        assert_eq!(noop.request_id, second.request_id);
+        assert_eq!(card.rollback_availability().unwrap().identity, backup);
     }
 
     #[test]
@@ -737,6 +1989,7 @@ mod tests {
                 model: model.into(),
                 firmware: firmware.into(),
                 free_bytes: None,
+                serial_number: None,
             };
             let message = format!("{:#}", stage(&card, &next, &device, &keys()).unwrap_err());
             assert!(message.contains(error), "{message}");

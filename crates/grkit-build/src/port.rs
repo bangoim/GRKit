@@ -786,7 +786,7 @@ impl Port {
         push(
             out,
             4,
-            &format!("family: &{}::FAMILY,", base.family.name),
+            &format!("family: &{}::{},", base.family.name, base.family.definition),
             "",
         );
         push(

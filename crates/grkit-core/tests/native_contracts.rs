@@ -64,7 +64,9 @@ fn compiler() -> Option<OsString> {
         env::var("GRKIT_REQUIRE_NATIVE_TESTS").as_deref() != Ok("1"),
         "GRKIT_REQUIRE_NATIVE_TESTS=1 requires a host C compiler; set GRKIT_HOST_CC or CC"
     );
-    eprintln!("SKIPPED native C contract test: no clang or cc found; set GRKIT_HOST_CC to a host compiler or GRKIT_REQUIRE_NATIVE_TESTS=1 to require coverage");
+    eprintln!(
+        "SKIPPED native C contract test: no clang or cc found; set GRKIT_HOST_CC to a host compiler or GRKIT_REQUIRE_NATIVE_TESTS=1 to require coverage"
+    );
     None
 }
 
@@ -727,6 +729,22 @@ fn native_state_contract_reads_the_pairs_of_the_loader() {
     checked(&mut Command::new(&executable));
 }
 
+#[test]
+fn native_control_mailbox_contract_bounds_and_serializes_requests() {
+    let Some(compiler) = compiler() else {
+        return;
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let executable = temporary.path().join("control_mailbox_contract");
+    compile(
+        &compiler,
+        &root().join("tests/runtime/control_mailbox_contract.c"),
+        &executable,
+        &[],
+    );
+    checked(&mut Command::new(&executable));
+}
+
 /// Each target, because the native tables and the grain form differ by
 /// camera family. The Rust codec and the camera agree on the words: the
 /// camera has each value of the recipes of the site (the presets and a
@@ -1093,7 +1111,13 @@ fn native_install_contract_plans_and_links_the_modules_of_the_card() {
     let library = library_recipes();
     let file = temporary.path().join("RECIPES.BIN");
     fs::write(&file, grkit_core::recipes::encode(&library).unwrap()).unwrap();
-    let output = checked(Command::new(&executable).env("GRKIT_TEST_RECIPES", &file));
+    let effect = temporary.path().join("MANAGED.GRF");
+    fs::write(&effect, grkit_core::testing::effect("managed")).unwrap();
+    let output = checked(
+        Command::new(&executable)
+            .env("GRKIT_TEST_RECIPES", &file)
+            .env("GRKIT_TEST_EFFECT", &effect),
+    );
     let entries: Vec<String> = String::from_utf8(output.stdout)
         .unwrap()
         .lines()
@@ -1517,4 +1541,247 @@ fn native_look_sample() -> Value {
     )
     .unwrap()
     .to_json()
+}
+
+/// The RTOS owner commits fixed manifest slots without rename or unlink. Every
+/// interrupted write recovers a complete old/new generation; flush/read errors
+/// never become successful commits.
+#[test]
+fn native_library_store_recovers_interrupted_commits() {
+    let Some(compiler) = compiler() else {
+        return;
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let executable = temporary.path().join("library_store_contract");
+    compile(
+        &compiler,
+        &root().join("tests/runtime/library_store_contract.c"),
+        &executable,
+        &[],
+    );
+    checked(&mut Command::new(&executable));
+}
+
+/// The resident owner binds the verified RTOS file API. App submission performs
+/// no I/O, every descriptor closes, and unproven durability cannot admit writes.
+#[test]
+fn native_library_owner_runs_file_io_only_in_resident_task() {
+    let Some(compiler) = compiler() else {
+        return;
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let executable = temporary.path().join("library_owner_contract");
+    compile(
+        &compiler,
+        &root().join("tests/runtime/library_owner_contract.c"),
+        &executable,
+        &[],
+    );
+    checked(&mut Command::new(&executable));
+}
+
+/// Stored manifests must satisfy the same bounded semantics as the service codec.
+#[test]
+fn native_library_manifest_rejects_invalid_configuration() {
+    let Some(compiler) = compiler() else {
+        return;
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let executable = temporary.path().join("library_manifest_contract");
+    compile(
+        &compiler,
+        &root().join("tests/runtime/library_manifest_contract.c"),
+        &executable,
+        &[],
+    );
+    checked(&mut Command::new(&executable));
+}
+
+/// The RTOS verifier agrees with Rust SHA-256 across padding and GRF boundaries.
+#[test]
+fn native_library_sha256_matches_content_hashes() {
+    let Some(compiler) = compiler() else {
+        return;
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let executable = temporary.path().join("library_sha256_contract");
+    compile(
+        &compiler,
+        &root().join("tests/runtime/library_sha256_contract.c"),
+        &executable,
+        &[],
+    );
+    checked(&mut Command::new(&executable));
+    let input = temporary.path().join("content.bin");
+    for length in (0..=129).chain([8192, 8704, 24736, 32768]) {
+        let bytes: Vec<u8> = (0..length).map(|i| (i * 73 + i / 7) as u8).collect();
+        fs::write(&input, &bytes).unwrap();
+        let output = checked(Command::new(&executable).arg(&input));
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            grkit_core::packaging::sha256(&bytes),
+            "length {length}"
+        );
+    }
+    for length in [0, 55, 56, 63, 64, 65, 8704, 600_000, 1_048_576] {
+        let bytes: Vec<u8> = (0..length).map(|i| (i * 73 + i / 7) as u8).collect();
+        fs::write(&input, &bytes).unwrap();
+        for chunk in [1, 7, 55, 64, 513, 8704] {
+            let output = checked(Command::new(&executable).arg(&input).arg(chunk.to_string()));
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                grkit_core::packaging::sha256(&bytes),
+                "length {length}, chunk {chunk}"
+            );
+        }
+    }
+}
+
+#[test]
+fn native_library_content_binds_exact_grf_to_manifest() {
+    let Some(compiler) = compiler() else {
+        return;
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let executable = temporary.path().join("library_content_contract");
+    compile(
+        &compiler,
+        &root().join("tests/runtime/library_content_contract.c"),
+        &executable,
+        &[root().join("runtime/grf.c")],
+    );
+    checked(&mut Command::new(&executable));
+}
+
+#[test]
+fn native_effect_record_prepares_private_slots() {
+    let Some(compiler) = compiler() else {
+        return;
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let executable = temporary.path().join("effect_record_contract");
+    compile(
+        &compiler,
+        &root().join("tests/runtime/effect_record_contract.c"),
+        &executable,
+        &[],
+    );
+    checked(&mut Command::new(&executable));
+}
+
+#[test]
+fn native_library_dependencies_include_hidden_recipes_and_dial_sets() {
+    let Some(compiler) = compiler() else {
+        return;
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let executable = temporary.path().join("library_dependencies_contract");
+    compile(
+        &compiler,
+        &root().join("tests/runtime/library_dependencies_contract.c"),
+        &executable,
+        &[],
+    );
+    checked(&mut Command::new(&executable));
+}
+
+#[test]
+fn native_library_objects_never_overwrite_generations() {
+    let Some(compiler) = compiler() else {
+        return;
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let executable = temporary.path().join("library_objects_contract");
+    compile(
+        &compiler,
+        &root().join("tests/runtime/library_objects_contract.c"),
+        &executable,
+        &[root().join("runtime/grf.c")],
+    );
+    checked(&mut Command::new(&executable));
+}
+
+#[test]
+fn native_exfat_flush_checks_mount_and_propagates_errors() {
+    let Some(compiler) = compiler() else {
+        return;
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    for source in ["library_exfat_contract", "library_exfat_gr3_contract"] {
+        let executable = temporary.path().join(source);
+        compile(
+            &compiler,
+            &root().join(format!("tests/runtime/{source}.c")),
+            &executable,
+            &[],
+        );
+        checked(&mut Command::new(&executable));
+    }
+}
+
+#[test]
+fn native_library_clock_preserves_elapsed_time_across_counter_wraps() {
+    let Some(compiler) = compiler() else {
+        return;
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let executable = temporary.path().join("library_clock_contract");
+    compile(
+        &compiler,
+        &root().join("tests/runtime/library_clock_contract.c"),
+        &executable,
+        &[],
+    );
+    checked(&mut Command::new(&executable));
+}
+
+#[test]
+fn native_directory_eof_requires_verified_terminal_cursor() {
+    let Some(compiler) = compiler() else {
+        return;
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let executable = temporary.path().join("directory_target");
+    for target in ["-DGRKIT_TARGET_GR3_221", "-DGRKIT_TARGET_GR4_121"] {
+        compile_for(
+            target,
+            &compiler,
+            &root().join("tests/runtime/directory_target_contract.c"),
+            &executable,
+            &[],
+        );
+        checked(&mut Command::new(&executable));
+    }
+}
+
+#[test]
+fn managed_boot_requires_positive_absence_evidence() {
+    let Some(compiler) = compiler() else {
+        return;
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let executable = temporary.path().join("managed_presence");
+    compile(
+        &compiler,
+        &root().join("tests/runtime/managed_presence_contract.c"),
+        &executable,
+        &[],
+    );
+    checked(&mut Command::new(executable));
+}
+
+#[test]
+fn native_library_candidate_preserves_origin_and_identity() {
+    let Some(compiler) = compiler() else {
+        return;
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let executable = temporary.path().join("library_candidate_contract");
+    compile(
+        &compiler,
+        &root().join("tests/runtime/library_candidate_contract.c"),
+        &executable,
+        &[root().join("runtime/grf.c")],
+    );
+    checked(&mut Command::new(executable));
 }

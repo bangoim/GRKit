@@ -44,8 +44,10 @@ typedef unsigned int u32;
 #define CORE_STATE_COUNT 9U
 #define CORE_STATE_IDS 861965461, 484706023, 790270076, 977751003, 826089556, 458876999, 697053196, 660632122, 618415657
 #define PARAMETER_KEY_BASE 990000000U
+#define PARAMETER_VALUE_MAX 387420488U
+#define TONING_KEY_BASE (PARAMETER_KEY_BASE + 32768U)
 #define RECIPE_VALUE_MAX 536870911U
-#define STATE_TEXT_MAX 16384U
+#define STATE_TEXT_MAX 32768U
 #define POINT_VIEWFINDER_OVERLAY 0x4U
 #define POINT_MENU_PAGE 0x1U
 #define POINT_PICTURE_ENCODE 0x10U
@@ -138,8 +140,10 @@ static int folder_exists(const char *folder)
         if (inside(card[i].path, folder)) return 1;
     return 0;
 }
+static const char *denied_path;
 static long open_path(const char *path, u32 flags)
 {
+    if (denied_path && !strcmp(path,denied_path)) return -13;
     u32 fd = 0;
     while (fd < OPEN_FILES && open_files[fd].used) ++fd;
     assert(fd < OPEN_FILES);
@@ -200,6 +204,7 @@ static long syscall6(u32 number, u32 a, u32 b, u32 c, u32 d, u32 e, u32 f)
     case 3: {
         if (!o || o->folder) return EBADF_ERROR;
         const struct card_file *file = &card[o->file];
+        if ((u32)o->position >= file->size) return 0;
         u32 n = file->size - (u32)o->position < c ? file->size - (u32)o->position : c;
         memcpy(host(b), file->bytes + o->position, n);
         o->position += n;
@@ -244,6 +249,7 @@ static volatile u8 *at(u32 physical)
 }
 static u32 word(u32 p) { return *(volatile u32 *)at(p); }
 static void store(u32 p, u32 v) { *(volatile u32 *)at(p) = v; }
+#define PERSIST_WORD(p,o) word((p)+(o))
 #define PERSIST_HALF(p,o) (*(volatile u16 *)at((p)+(o)))
 #define PERSIST_BYTE(p,o) (at((p)+(o))[0])
 #define PERSIST_SETTINGS(h) ((h)[GRKIT_HOST_MODULE_SETTINGS/4] ? (volatile u32 *)at((h)[GRKIT_HOST_MODULE_SETTINGS/4]) : (volatile u32 *)0)
@@ -270,6 +276,12 @@ static u32 listed_record[EFFECTS_LISTED];
 #define EFFECT_PATH_SIZE (sizeof(legacy_effects_path) + CATALOG_NAME_SIZE)
 #include "install_library.h"
 #include "install_effects.h"
+#undef GRKIT_NO_IMAGE_CONTROL
+static int managed_test_tone(void) { return 1; }
+#define tone_used managed_test_tone
+#include "install_managed_library.h"
+#undef tone_used
+#define GRKIT_NO_IMAGE_CONTROL 1
 static u32 module_tiles;
 #include "install_plan.h"
 static u32 needed_points;
@@ -711,7 +723,7 @@ static void code_overflow_leaves_camera_memory_unchanged(void)
    the services block. */
 static void the_budget_counts_the_services_block(void)
 {
-    const u32 big = 2 * GRM_MAX_SEGMENT / 4;
+    const u32 big = GRM_MAX_SEGMENT / 16;
     const u32 others = SETTINGS_WORDS(CHOICE_ENTRIES(2, EFFECTS_LISTED)) + 2 * CONTEXT_WORDS(0) +
                        MANAGE_WORDS(2) + EFFECT_LIST_WORDS(EFFECTS_LISTED) + SERVICES_WORDS + big;
     const u32 room = GRKIT_MODULE_ARRAY_WORDS - others;
@@ -719,10 +731,10 @@ static void the_budget_counts_the_services_block(void)
     for (u32 extra = 0; extra < 2; ++extra) {
         reset();
         add_module(PACKAGE_MODULES_PATH, "BIG.GRM",
-                   &(struct spec){.id = "BIG", .order = 1, .data_bytes = GRM_MAX_SEGMENT, .bss_bytes = GRM_MAX_SEGMENT});
+                   &(struct spec){.id = "BIG", .order = 1, .data_bytes = GRM_MAX_SEGMENT / 4});
         add_module(PACKAGE_MODULES_PATH, "FILL.GRM",
-                   &(struct spec){.id = "FILL", .order = 2, .data_bytes = (room + extra) * 4 - GRM_MAX_SEGMENT,
-                                  .bss_bytes = GRM_MAX_SEGMENT});
+                   &(struct spec){.id = "FILL", .order = 2, .data_bytes = GRM_MAX_SEGMENT,
+                                  .bss_bytes = (room + extra) * 4 - GRM_MAX_SEGMENT});
         plan_modules();
         assert(module_status[0] == 0 && module_status[1] == (extra ? GRM_NO_ROOM : 0));
         assert(module_usable == (extra ? 1U : 3U));
@@ -731,6 +743,32 @@ static void the_budget_counts_the_services_block(void)
         plan_array();
         assert(module_words <= GRKIT_MODULE_ARRAY_WORDS);
         assert(extra || module_words == GRKIT_MODULE_ARRAY_WORDS);
+    }
+}
+static void effect_slots_keep_services_and_setting_handles_stable(void)
+{
+    u32 service_at = 0, switch_at = 0, words = 0;
+    for (u32 n = 0; n <= EFFECTS_LISTED; n += EFFECTS_LISTED) {
+        reset();
+        add_module(PACKAGE_MODULES_PATH, "TEST.GRM", &(struct spec){.id = "TEST", .order = 1});
+        listed_count = n;
+        for (u32 i = 0; i < n; ++i) {
+            memset(listed[i], 0, sizeof listed[i]);
+            listed_choice[i] = 0;
+            listed_record[i] = EFFECTS_NO_RECORD;
+            listed_status[i] = EFFECT_OFF;
+        }
+        assert(install() == 0);
+        assert(effect_list && word(effect_list + EFFECTS_COUNT) == n);
+        if (!n) {
+            service_at = services_block;
+            switch_at = word(module_list + MANAGE_SWITCH);
+            words = module_words;
+        } else {
+            assert(services_block == service_at);
+            assert(word(module_list + MANAGE_SWITCH) == switch_at);
+            assert(module_words == words);
+        }
     }
 }
 static const struct spec guides = {
@@ -763,7 +801,7 @@ static void install_writes_the_settings_and_the_contexts(void)
        of each module, then the saved values that no setting takes: CORE.GRAIN, which no module uses, and unknown keys,
        including a value 0. The saved unit is a setting, not a kept value:
        apply_state restores it. */
-    assert(word(ARRAY_AT) == 20 && word(ARRAY_AT + 4) == 0);
+    assert(word(ARRAY_AT) == 20 + EFFECTS_LISTED && word(ARRAY_AT + 4) == 0);
     expect_setting(0, id_of("GUIDES.STYLE"), 0, 6);
     expect_setting(1, id_of("GUIDES.COLOR"), 0, 3);
     expect_setting(2, 0, 0, 2);
@@ -774,19 +812,20 @@ static void install_writes_the_settings_and_the_contexts(void)
     expect_setting(7, id_of("CORE.OFF.DATE"), 1, 2);
     expect_setting(8, id_of("CORE.POS.DATE"), 0, MANAGE_POS_VALUES);
     expect_setting(9, id_of("CORE.ROWS.DATE"), 5, 1U << MANAGE_OPTION_VALUES);
-    expect_setting(10, id_of("CORE.OFF"), 0, 2);
-    expect_setting(11, id_of("CORE.START"), MANAGE_START_KEEP, MANAGE_START_VALUES);
-    expect_setting(12, id_of("CORE.UNIT"), MANAGE_UNIT_METERS, MANAGE_UNIT_VALUES);
-    expect_setting(13, id_of("CORE.ORDER.GUIDES"), 0x321, MANAGE_ORDER_LIMIT);
-    expect_setting(14, id_of("CORE.ORDER2.GUIDES"), 0, MANAGE_ORDER_LIMIT);
-    expect_setting(15, id_of("CORE.ORDER.DATE"), 0, MANAGE_ORDER_LIMIT);
-    expect_setting(16, id_of("CORE.ORDER2.DATE"), 0x7, MANAGE_ORDER_LIMIT);
-    expect_setting(17, 12345, 7, 8);
-    expect_setting(18, 23456, 0, 1);
-    expect_setting(19, id_of("CORE.GRAIN"), 1, 2);
+    for (u32 i = 0; i < EFFECTS_LISTED; ++i) expect_setting(10 + i, 0, 0, 0);
+    expect_setting(10 + EFFECTS_LISTED, id_of("CORE.OFF"), 0, 2);
+    expect_setting(11 + EFFECTS_LISTED, id_of("CORE.START"), MANAGE_START_KEEP, MANAGE_START_VALUES);
+    expect_setting(12 + EFFECTS_LISTED, id_of("CORE.UNIT"), MANAGE_UNIT_METERS, MANAGE_UNIT_VALUES);
+    expect_setting(13 + EFFECTS_LISTED, id_of("CORE.ORDER.GUIDES"), 0x321, MANAGE_ORDER_LIMIT);
+    expect_setting(14 + EFFECTS_LISTED, id_of("CORE.ORDER2.GUIDES"), 0, MANAGE_ORDER_LIMIT);
+    expect_setting(15 + EFFECTS_LISTED, id_of("CORE.ORDER.DATE"), 0, MANAGE_ORDER_LIMIT);
+    expect_setting(16 + EFFECTS_LISTED, id_of("CORE.ORDER2.DATE"), 0x7, MANAGE_ORDER_LIMIT);
+    expect_setting(17 + EFFECTS_LISTED, 12345, 7, 8);
+    expect_setting(18 + EFFECTS_LISTED, 23456, 0, 1);
+    expect_setting(19 + EFFECTS_LISTED, id_of("CORE.GRAIN"), 1, 2);
     /* The contexts: the first setting, the count, reserved, then the handle
        of each used setting. */
-    u32 context = ARRAY_AT + 4 * SETTINGS_WORDS(20);
+    u32 context = ARRAY_AT + 4 * SETTINGS_WORDS(20 + EFFECTS_LISTED);
     assert(word(context) == 0 && word(context + 4) == 3 && word(context + 8) == 0);
     assert(word(context + 12) == GRKIT_CORE_ASPECT && word(context + 16) == GRM_NO_SETTING);
     u32 date_context = context + 4 * CONTEXT_WORDS(2);
@@ -800,10 +839,10 @@ static void install_writes_the_settings_and_the_contexts(void)
     assert(capabilities_running == capabilities_used);
     assert((needed_points & core_setting_points[1]) == core_setting_points[1]);
     assert(word(module_list + MANAGE_SETTINGS) == 4);
-    assert(word(module_list + MANAGE_SWITCH) == 10 + 1);
-    assert(word(module_list + MANAGE_START) == 11 + 1);
-    assert(word(module_list + MANAGE_ORDERS) == 13 + 1);
-    assert(word(module_list + MANAGE_UNIT) == 12 + 1);
+    assert(word(module_list + MANAGE_SWITCH) == 10 + EFFECTS_LISTED + 1);
+    assert(word(module_list + MANAGE_START) == 11 + EFFECTS_LISTED + 1);
+    assert(word(module_list + MANAGE_ORDERS) == 13 + EFFECTS_LISTED + 1);
+    assert(word(module_list + MANAGE_UNIT) == 12 + EFFECTS_LISTED + 1);
 }
 /* Defaults initialize both saved and transient settings. Explicit saved zero
    survives a restart and a period without the module installed. */
@@ -1870,6 +1909,80 @@ static void the_sets_of_the_user_modes_restore(void)
 /* INSTALL publishes a baseline after restores, before any App edits. The
    same collector as the runtime writes every field, including zero values,
    without counting restored content as a new edit. */
+static void install_restores_unloaded_parameters_by_identity(void)
+{
+    reset();
+    effect_list=MEMORY_BASE+0xb0000;
+    const u32 base=MEMORY_BASE+0xc0000;
+    count=0; listed_count=2;
+    memset(listed,0,sizeof(listed));
+    memcpy(listed[0]+GRKIT_GRF_ID,"saved",6);
+    memcpy(listed[1]+GRKIT_GRF_ID,"defaults",9);
+    for(u32 i=0;i<2;++i) {
+        listed_record[i]=EFFECTS_NO_RECORD;
+        store(effect_list+EFFECTS_HEADER+i*EFFECTS_STRIDE+EFFECTS_RECORD,EFFECTS_NO_RECORD);
+    }
+    u32 code=look_parameter_code(listed[0]+GRKIT_GRF_ID);
+    state_set(&saved_state,GRKIT_LOOK_PARAMETER_KEY_BASE+code,123);
+    state_set(&saved_state,GRKIT_LOOK_TONING_KEY_BASE+code,4);
+    for(u32 k=0;k<8;++k) state_set(&saved_state,GRKIT_LOOK_ID_KEY_BASE+k*32768U+code,
+        look_parameter_id_word(listed[0]+GRKIT_GRF_ID,k));
+    restore_listed_parameters(base,effect_list);
+    u32 entry=effect_list+EFFECTS_HEADER;
+    assert(word(entry+EFFECTS_PARAMETER_CODE)==code);
+    assert(word(entry+EFFECTS_PARAMETER_FN)==123 && word(entry+EFFECTS_PARAMETER_TONING)==4);
+    assert(!word(entry+EFFECTS_STRIDE+EFFECTS_PARAMETER_FN));
+    /* Full ID verification rejects a reused hash bucket across cold starts. */
+    state_set(&saved_state,GRKIT_LOOK_ID_KEY_BASE+code,0);
+    restore_listed_parameters(base,effect_list);
+    assert(!word(entry+EFFECTS_PARAMETER_FN) && !word(entry+EFFECTS_PARAMETER_TONING));
+    /* Distinct hashes can share a native code after GR IV page remapping. */
+    memset(listed,0,sizeof(listed));
+    memcpy(listed[0]+GRKIT_GRF_ID,"look20233",10);
+    memcpy(listed[1]+GRKIT_GRF_ID,"look47836",10);
+    assert(look_parameter_code(listed[0]+GRKIT_GRF_ID)==0x100);
+    assert(look_parameter_code(listed[1]+GRKIT_GRF_ID)==0x200);
+    saved_state.pairs=0;
+    state_set(&saved_state,PARAMETER_KEY_BASE+0x200,999); /* Unproven historical owner. */
+    for(u32 i=0;i<2;++i) {
+        u32 hash=look_parameter_code(listed[i]+GRKIT_GRF_ID);
+        state_set(&saved_state,GRKIT_LOOK_PARAMETER_KEY_BASE+hash,71+i);
+        state_set(&saved_state,GRKIT_LOOK_TONING_KEY_BASE+hash,3+i);
+        for(u32 k=0;k<8;++k) state_set(&saved_state,GRKIT_LOOK_ID_KEY_BASE+k*32768U+hash,
+            look_parameter_id_word(listed[i]+GRKIT_GRF_ID,k));
+    }
+    for(u32 loaded=0;loaded<3;++loaded) {
+        count=loaded;
+        for(u32 i=0;i<2;++i) {
+            listed_record[i]=i<loaded ? i : EFFECTS_NO_RECORD;
+            store(entry+i*EFFECTS_STRIDE+EFFECTS_RECORD,listed_record[i]);
+            *(volatile u16 *)at(base+GRKIT_HOST_HEADER_SIZE+i*GRKIT_RECORD_SIZE+GRKIT_RECORD_CODE)=(u16)(0x8200+i);
+        }
+        restore_listed_parameters(base,effect_list);
+        for(u32 i=0;i<2;++i) {
+            assert(word(entry+i*EFFECTS_STRIDE+EFFECTS_PARAMETER_FN)==71+i);
+            assert(word(entry+i*EFFECTS_STRIDE+EFFECTS_PARAMETER_TONING)==3+i);
+        }
+    }
+    /* A different full ID with the same 15-bit hash never inherits state. */
+    memset(listed,0,sizeof(listed)); listed_count=1;
+    memcpy(listed[0]+GRKIT_GRF_ID,"collision787",13);
+    code=look_parameter_code(listed[0]+GRKIT_GRF_ID);
+    saved_state.pairs=0;
+    state_set(&saved_state,GRKIT_LOOK_PARAMETER_KEY_BASE+code,55);
+    for(u32 k=0;k<8;++k) state_set(&saved_state,GRKIT_LOOK_ID_KEY_BASE+k*32768U+code,
+        look_parameter_id_word(listed[0]+GRKIT_GRF_ID,k));
+    memset(listed[0]+GRKIT_GRF_ID,0,32); memcpy(listed[0]+GRKIT_GRF_ID,"collision1250",14);
+    assert(code==look_parameter_code(listed[0]+GRKIT_GRF_ID));
+    restore_listed_parameters(base,effect_list);
+    assert(!word(entry+EFFECTS_PARAMETER_FN));
+    listed_count=2;
+    saved_state.pairs=0;
+    state_set(&saved_state,PARAMETER_KEY_BASE+0x200,999);
+    restore_listed_parameters(base,effect_list);
+    assert(!word(entry+EFFECTS_PARAMETER_FN) && !word(entry+EFFECTS_STRIDE+EFFECTS_PARAMETER_FN));
+}
+
 static void install_captures_the_complete_persistence_baseline(void)
 {
     const u32 header = MEMORY_BASE + 0xc0000U, record = header + GRKIT_HOST_HEADER_SIZE;
@@ -1886,6 +1999,7 @@ static void install_captures_the_complete_persistence_baseline(void)
     h[GRKIT_HOST_CROP / 4] = 3;
     h[GRKIT_HOST_BORDER / 4] = 2;
     *(volatile u16 *)at(record + GRKIT_RECORD_CODE) = 0x8123;
+    memcpy((void *)at(record + GRKIT_RECORD_ID),"persist",8);
     at(record + GRKIT_RECORD_PARAMETERS)[0] = 2;
     at(record + GRKIT_RECORD_PARAMETERS + 1)[0] = 3;
     at(record + GRKIT_RECORD_TONING)[0] = 4;
@@ -1896,7 +2010,7 @@ static void install_captures_the_complete_persistence_baseline(void)
     assert(p[GRKIT_PERSIST_CORE / 4 + GRKIT_CORE_TONE - GRKIT_CORE_SETTING_BASE] == 0x8123);
     assert(p[GRKIT_PERSIST_CORE / 4 + GRKIT_CORE_CROP - GRKIT_CORE_SETTING_BASE] == 3);
     assert(p[GRKIT_PERSIST_CORE / 4 + GRKIT_CORE_BORDER - GRKIT_CORE_SETTING_BASE] == 2);
-    assert(p[GRKIT_PERSIST_EFFECT_COUNT / 4] == 1 && p[GRKIT_PERSIST_EFFECTS / 4] == 0x123);
+    assert(p[GRKIT_PERSIST_EFFECT_COUNT / 4] == 1 && p[GRKIT_PERSIST_EFFECTS / 4] == look_parameter_code((const u8 *)"persist"));
     assert(p[GRKIT_PERSIST_EFFECTS / 4 + 1] == 29 && p[GRKIT_PERSIST_EFFECTS / 4 + 2] == 4);
     for (u32 i = GRKIT_PERSIST_EFFECT_WORDS; i < GRKIT_PERSIST_EFFECTS_WORDS; ++i)
         assert(!p[GRKIT_PERSIST_EFFECTS / 4 + i]);
@@ -1910,8 +2024,98 @@ static void install_captures_the_complete_persistence_baseline(void)
         assert(!p[GRKIT_PERSIST_MODULES / 4 + i]);
 }
 
+/* Boot twice through the real managed selector, with an obsolete inbox and
+   stale state beside it. Never use a damaged managed catalog as legacy data. */
+static void managed_boot_catalog(void)
+{
+    static u8 grf[GRKIT_GRF_MAX_SIZE],slot[LIBRARY_STORE_SLOT_BYTES],manifest_bytes[132];
+    const char *input=getenv("GRKIT_TEST_EFFECT"); assert(input);
+    FILE *file=fopen(input,"rb"); assert(file);
+    u32 length=(u32)fread(grf,1,sizeof(grf),file); assert(!fclose(file));
+    assert(valid_profile(grf,length));
+    reset(); assert(!managed_probe() && !managed_library);
+    zero(manifest_bytes,sizeof(manifest_bytes)); copy(manifest_bytes,(const u8 *)"GRKLIB01",8);
+    put32(manifest_bytes+8,1); put32(manifest_bytes+12,130); put32(manifest_bytes+16,1); put32(manifest_bytes+20,1);
+    copy(manifest_bytes+32,grf+GRKIT_GRF_ID,32); copy(manifest_bytes+64,grf+GRKIT_GRF_NAME,20);
+    assert(library_sha256(grf,length,manifest_bytes+84)); put32(manifest_bytes+116,9);
+    put32(manifest_bytes+120,get32(grf+GRKIT_GRF_FEATURES));
+    put32(manifest_bytes+24,library_store_crc(manifest_bytes,130,24,4));
+    char name[13],path[96]; managed_filename(manifest_bytes+84,name);
+    assert(join(path,sizeof(path),DATA_PATH "/CONTENT",name)); add_file(path,grf,length);
+    add_file(INBOX_PATH "/OLD.GRF",grf,length);
+    zero(slot,sizeof(slot)); copy(slot,(const u8 *)"GRKSLOT1",8);
+    put32(slot+8,1); put32(slot+12,130); put32(slot+16,library_store_crc(manifest_bytes,130,0,0));
+    put32(slot+24,1); put32(slot+20,library_store_crc(slot,32,20,4)); copy(slot+32,manifest_bytes,130);
+    u8 *commit=slot+LIBRARY_STORE_COMMIT_OFFSET;
+    put32(commit,0x54494d43U); put32(commit+4,1); put32(commit+8,get32(slot+16));
+    put32(commit+12,library_store_crc(commit,16,12,4));
+    add_file(DATA_PATH "/LIB0.BIN",slot,sizeof(slot));
+    /* A preallocation or seed that has not activated remains legacy. */
+    assert(!managed_probe() && !managed_library);
+    card[2].size=0; assert(!managed_probe() && !managed_library);
+    card[2].size=20; assert(!managed_probe() && !managed_library);
+    card[2].size=sizeof(slot);
+    memset(card[2].bytes,0,sizeof(slot)); assert(!managed_probe() && !managed_library);
+    memcpy(card[2].bytes,slot,sizeof(slot));
+    denied_path=DATA_PATH "/LIB0.BIN";
+    assert(managed_probe()==STATUS_LIBRARY_UNREADABLE); denied_path=0;
+    denied_path=DATA_PATH "/LIB.ACT";
+    assert(managed_probe()==STATUS_LIBRARY_UNREADABLE); denied_path=0;
+    u8 activation[LIBRARY_ACTIVATION_BYTES];
+    library_activation_encode(activation,get32(slot+16));
+    add_file(DATA_PATH "/LIB.ACT",activation,sizeof(activation));
+    card[3].bytes=realloc(card[3].bytes,33); card[3].bytes[32]=0;
+    card[3].size=33; assert(managed_probe()==STATUS_LIBRARY_UNREADABLE);
+    card[3].size=0; assert(managed_probe()==STATUS_LIBRARY_UNREADABLE);
+    card[3].size=16; assert(managed_probe()==STATUS_LIBRARY_UNREADABLE);
+    card[3].size=32; card[3].bytes[24]^=1; assert(managed_probe()==STATUS_LIBRARY_UNREADABLE);
+    card[3].bytes[24]^=1;
+    library_activation_encode(card[3].bytes,get32(slot+16)^1U);
+    assert(managed_probe()==STATUS_LIBRARY_UNREADABLE);
+    memcpy(card[3].bytes,activation,sizeof(activation));
+    for(u32 boot=0;boot<2;++boot) {
+        u32 files=card_count; assert(!managed_scan() && managed_library);
+        assert(count==1 && listed_count==1 && listed_choice[0]==2);
+        assert(card_count==files && managed_selected(0));
+    }
+    /* A newer generation disables it; persisted CORE.STATE cannot enable it. */
+    put32(manifest_bytes+116,8); put32(manifest_bytes+24,library_store_crc(manifest_bytes,130,24,4));
+    put32(slot+8,2); put32(slot+16,library_store_crc(manifest_bytes,130,0,0));
+    put32(slot+20,library_store_crc(slot,32,20,4)); copy(slot+32,manifest_bytes,130);
+    put32(commit+4,2); put32(commit+8,get32(slot+16)); put32(commit+12,library_store_crc(commit,16,12,4));
+    add_file(DATA_PATH "/LIB1.BIN",slot,sizeof(slot));
+    strcpy(card[3].path,DATA_PATH "/LIB.SAVED");
+    assert(managed_probe()==STATUS_LIBRARY_UNREADABLE && managed_library);
+    /* Corrupting a post-seed generation cannot make it initial migration. */
+    card[4].bytes[0]^=1;
+    assert(managed_probe()==STATUS_LIBRARY_UNREADABLE && managed_library);
+    card[4].bytes[0]^=1;
+    strcpy(card[3].path,DATA_PATH "/LIB.ACT");
+    assert(!managed_scan() && listed_choice[0]==3 && !managed_selected(0));
+    /* Delete keeps the identity tombstone but removes it from the boot list. */
+    put32(manifest_bytes+12,128); put32(manifest_bytes+20,0); put32(manifest_bytes+116,10);
+    put32(manifest_bytes+24,library_store_crc(manifest_bytes,128,24,4));
+    put32(slot+8,3); put32(slot+12,128); put32(slot+16,library_store_crc(manifest_bytes,128,0,0));
+    put32(slot+20,library_store_crc(slot,32,20,4)); copy(slot+32,manifest_bytes,128);
+    put32(commit+4,3); put32(commit+8,get32(slot+16)); put32(commit+12,library_store_crc(commit,16,12,4));
+    memcpy(card[card_count-1].bytes,slot,sizeof(slot));
+    assert(!managed_scan() && !listed_count && !count && !managed_selected(0));
+    /* Torn newest commit can use the last valid slot; corrupt contents cannot. */
+    card[card_count-1].bytes[LIBRARY_STORE_COMMIT_OFFSET]^=1;
+    assert(!managed_probe() && !managed_discover() && listed_count==1);
+    card[0].bytes[100]^=1;
+    assert(managed_probe()==STATUS_LIBRARY_UNREADABLE && managed_library);
+    card[0].bytes[100]^=1;
+    card[2].bytes[0]^=1;
+    assert(managed_probe()==STATUS_LIBRARY_UNREADABLE && managed_library);
+    /* Truncated slot is an I/O failure, not permission to import the inbox. */
+    card[2].size=4;
+    assert(managed_probe()==STATUS_LIBRARY_UNREADABLE && managed_library);
+    reset();
+}
 static void *run(void *unused)
 {
+    managed_boot_catalog();
     (void)unused;
     imported_lines_give_the_hash_of_an_unchanged_file();
     the_package_list_leaves_out_effects();
@@ -1926,6 +2130,7 @@ static void *run(void *unused)
     module_code_follows_the_actual_core();
     code_overflow_leaves_camera_memory_unchanged();
     the_budget_counts_the_services_block();
+    effect_slots_keep_services_and_setting_handles_stable();
     install_writes_the_settings_and_the_contexts();
     setting_defaults_and_saved_zero();
     framing_mode_state_survives_install_planning();
@@ -1948,6 +2153,7 @@ static void *run(void *unused)
     the_recipes_restore_and_import_once();
     recipes_keep_their_ids();
     the_sets_of_the_user_modes_restore();
+    install_restores_unloaded_parameters_by_identity();
     install_captures_the_complete_persistence_baseline();
     reset();
     return 0;

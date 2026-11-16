@@ -341,6 +341,7 @@ static void recipe_skipped(u32 skipped) {
 static void recipe_type_written(volatile u32 *h) { h[GRKIT_HOST_ADJ_IC_TYPE/4]=MENU_NATIVE_IC_TYPE(); }
 static void recipe_ok(volatile u32 *h,u32 row) {
     u32 slot=recipe_row_slot(h,row), saved, result;
+    if(!GRKIT_LOOK_MUTATION_ALLOWED(h)) return;
     if(slot==RECIPE_ROW_UNDO) {
         recipe_undo(h);
         recipe_type_written(h);
@@ -349,6 +350,7 @@ static void recipe_ok(volatile u32 *h,u32 row) {
     }
     if(slot==RECIPE_ROW_SAVE) {
         saved=recipe_save(h);
+        if(saved==RECIPE_SAVE_BUSY) return;
         if(saved==RECIPE_FULL) { recipe_message(h,RECIPE_TEXT_FULL); return; }
         h[GRKIT_HOST_MENU_CURSOR/4]=recipe_row_of(h,saved);
         if(!recipe_keyboard(h,saved,recipe_saved_back)) recipe_saved_toast(h,saved);
@@ -363,6 +365,7 @@ static void recipe_ok(volatile u32 *h,u32 row) {
     recipe_preview_drop(h);
     recipe_type_written(h);
     switch(result) {
+    case RECIPE_BUSY: return;
     case RECIPE_MISSING: recipe_message(h,RECIPE_TEXT_MISSING); return;
     case RECIPE_UNSUPPORTED: recipe_message(h,RECIPE_TEXT_UNSUPPORTED); return;
     default: break;

@@ -39,7 +39,9 @@ int main(int argc, char **argv)
         assert(sscanf(argv[1] + i * 2, "%2x", &value) == 1);
         BYTE(record, GRKIT_RECORD_SELECTIVE + i) = (u8)value;
     }
-    selective_table(record, table, &factors);
+    Selective parameters;
+    selective_load(record, &parameters);
+    selective_table_from_params(&parameters, table, &factors);
     fwrite(table, 1, sizeof table, stdout);
     return 0;
 }

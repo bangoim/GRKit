@@ -1,5 +1,6 @@
 #ifndef GRKIT_RECIPES_H
 #define GRKIT_RECIPES_H
+#include "look_guard.h"
 /* The recipes of CORE.RECIPE: named snapshots of the picture settings that
    OK applies in one step. The header holds GRKIT_RECIPE_SLOTS recipes
    (GRKIT_HOST_RECIPES) and GRKIT_RECIPE_UNDO undo steps, the oldest first
@@ -112,6 +113,8 @@
 #define RECIPE_MISSING 1U
 /* A native value that this camera does not have. */
 #define RECIPE_UNSUPPORTED 2U
+/* A durable library transaction temporarily holds App mutations. */
+#define RECIPE_BUSY 3U
 /* The bits of an apply that left settings out: a Grain that is not Off,
    because no Grain module runs, and a setting of module m that is not Off
    while module m of GRKIT_RECIPE_MODULES is not loaded. */
@@ -123,6 +126,7 @@
 #define RECIPE_NONE 0xffffffffU
 /* The result of a save: the slot of the new recipe, or RECIPE_FULL. */
 #define RECIPE_FULL 0xffffffffU
+#define RECIPE_SAVE_BUSY 0xfffffffeU
 
 #define RECIPE_CAPABILITY(h,key) ((h)[GRKIT_HOST_CAPABILITIES/4]&GRKIT_CORE_##key##_BIT)
 #define RECIPE_ALL (GRKIT_RECIPE_SLOTS+GRKIT_RECIPE_UNDO)
@@ -183,6 +187,7 @@ static u32 recipe_name_char(volatile u32 *h,u32 slot,u32 i) {
    characters without the spaces at both ends, at most
    GRKIT_RECIPE_NAME_CHARS. A text without one gives the automatic name. */
 static void recipe_name_set(volatile u32 *h,u32 slot,const volatile u8 *text) {
+    if(!GRKIT_LOOK_MUTATION_ALLOWED(h)) return;
     u32 w[GRKIT_RECIPE_NAME_WORDS]={0}, n=0, spaces=0, i, c;
     for(i=0;text[i] && n<GRKIT_RECIPE_NAME_CHARS;++i) {
         c=text[i];
@@ -227,6 +232,7 @@ static volatile u32 *recipe_words(volatile u32 *h,u32 e) { return recipe_at(h,e)
 /* Whether entry e shows in ADJ, and its change (the Options of the module). */
 static u32 recipe_shown(volatile u32 *h,u32 e) { return !(recipe_at(h,e)[0]&RECIPE_HIDDEN); }
 static void recipe_show_in_adj(volatile u32 *h,u32 e,u32 shown) {
+    if(!GRKIT_LOOK_MUTATION_ALLOWED(h)) return;
     volatile u32 *w;
     if(e>=recipe_entries(h)) return;
     w=recipe_at(h,e);
@@ -255,7 +261,7 @@ static u32 recipe_shown_index(volatile u32 *h,u32 e) {
 
 /* The record of record index i. */
 static u32 recipe_record(volatile u32 *h,u32 i) {
-    return h[GRKIT_HOST_RECORDS/4]+i*GRKIT_RECORD_SIZE;
+    return record_address(h,i);
 }
 /* The code of the effect of a record: the low 15 bits of the FNV-1a hash of
    its ID, which ends at a NUL before GRKIT_RECORD_CODE. */
@@ -270,7 +276,7 @@ static u32 recipe_effect(volatile u32 *h,u32 code) {
     u32 n=h[GRKIT_HOST_COUNT/4], i;
     if(n>GRKIT_TEXT_RECORDS) return GRKIT_TEXT_RECORDS;
     for(i=0;i<n;++i)
-        if(recipe_effect_code(recipe_record(h,i))==code) return i;
+        if(GRKIT_LOOK_RECORD_ALLOWED(h,i) && recipe_effect_code(recipe_record(h,i))==code) return i;
     return GRKIT_TEXT_RECORDS;
 }
 /* The stored Fn adjustments of a record as base-9 digits, the first lowest.
@@ -557,6 +563,7 @@ static u32 recipe_same_base(const volatile u32 *a,const u32 *b) {
    by one. The first recipe of a look has no number, the next one the
    largest number of that look plus 1 (2 after the first). */
 static u32 recipe_save(volatile u32 *h) {
+    if(!GRKIT_LOOK_MUTATION_ALLOWED(h)) return RECIPE_SAVE_BUSY;
     u32 n=recipe_count(h), e=recipe_entries(h), w[GRKIT_RECIPE_WORDS], i, number=0, other;
     if(n>=GRKIT_RECIPE_SLOTS || e>=GRKIT_RECIPE_ON_MAX) return RECIPE_FULL;
     /* A whole look with the exposure settings, and with Off for each
@@ -584,6 +591,7 @@ static u32 recipe_save(volatile u32 *h) {
    The lists of ADJ and MENU show the entries in this order, and the recipe
    file keeps it. */
 static void recipe_move(volatile u32 *h,u32 from,u32 to) {
+    if(!GRKIT_LOOK_MUTATION_ALLOWED(h)) return;
     u32 n=recipe_entries(h), w[GRKIT_RECIPE_WORDS], name[GRKIT_RECIPE_NAME_WORDS], id, i;
     if(from>=n || to>=n || from==to) return;
     for(i=0;i<GRKIT_RECIPE_WORDS;++i) w[i]=recipe_at(h,from)[i];
@@ -598,6 +606,7 @@ static void recipe_move(volatile u32 *h,u32 from,u32 to) {
 }
 /* Delete entry `slot`. The recipes after it move up. */
 static void recipe_delete(volatile u32 *h,u32 slot) {
+    if(!GRKIT_LOOK_MUTATION_ALLOWED(h)) return;
     u32 n=recipe_count(h);
     if(slot>=recipe_entries(h)) return;
     recipe_close_gap(h,slot,n);
@@ -625,6 +634,7 @@ static u32 recipe_entry_reason(volatile u32 *h,u32 e) {
    before it become an undo step, which also keeps the native settings that
    the apply writes. */
 static u32 recipe_apply(volatile u32 *h,u32 e) {
+    if(!GRKIT_LOOK_MUTATION_ALLOWED(h)) return RECIPE_BUSY;
     u32 w[GRKIT_RECIPE_WORDS], reason, i, slot, skipped;
     reason=recipe_entry_reason(h,e);
     if(reason!=RECIPE_READY) return reason;
@@ -640,6 +650,7 @@ static u32 recipe_apply(volatile u32 *h,u32 e) {
    step whose effect is no longer installed restores the settings that it
    can. */
 static void recipe_undo(volatile u32 *h) {
+    if(!GRKIT_LOOK_MUTATION_ALLOWED(h)) return;
     u32 n=recipe_undo_count(h), w[GRKIT_RECIPE_WORDS], i, slot;
     if(!n) return;
     slot=GRKIT_RECIPE_SLOTS+n-1U;

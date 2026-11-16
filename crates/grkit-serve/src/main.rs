@@ -6,7 +6,9 @@
 //! file on the card stays open while it runs.
 
 use grkit_serve::{
-    head_end, parse, read_head, respond,
+    api::{Reply, Service},
+    head_end, parse, read_head,
+    transport::{admit, ConnectionSlot, DeadlineReader, IDLE_TIMEOUT},
     update::{Card, Device, MAX_PACKAGE},
     Connection, Env, Response, System, PORT,
 };
@@ -23,13 +25,13 @@ use std::{
     io::{self, Read, Write},
     net::{Shutdown, TcpListener, TcpStream},
     process::ExitCode,
+    sync::{atomic::AtomicUsize, Arc, Mutex},
     thread,
     time::Duration,
 };
 
-/// How long the service waits for a slow peer. It serves one connection at a
-/// time, so a peer that stops sending must not hold it.
-const PEER_TIMEOUT: Duration = Duration::from_secs(5);
+/// Maximum idle time for a peer and for the camera properties API.
+const PEER_TIMEOUT: Duration = IDLE_TIMEOUT;
 /// The pause after a failed `accept`, so that a lasting failure (for example,
 /// no free file descriptor) does not keep the CPU busy.
 const ACCEPT_PAUSE: Duration = Duration::from_millis(500);
@@ -47,11 +49,67 @@ fn main() -> ExitCode {
     let Ok(listener) = TcpListener::bind(("0.0.0.0", PORT)) else {
         return ExitCode::FAILURE;
     };
+    let Ok(boot_id) = grkit_serve::identity::boot_id() else {
+        return ExitCode::FAILURE;
+    };
+    let mut nonce = [0u8; 16];
+    if std::fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut nonce))
+        .is_err()
+    {
+        return ExitCode::FAILURE;
+    }
+    let backend = grkit_serve::runtime_backend::LazyLinuxBackend::new(
+        std::path::PathBuf::from(grkit_core::card::LINUX_CARD),
+        grkit_core::release::OFFICIAL_KEYS.to_vec(),
+        nonce,
+    );
+    let service = Arc::new(Service::with_runtime_backend(boot_id, Box::new(backend)));
+    let card_access = Arc::new(Mutex::new(()));
+    let monitor = Arc::clone(&service);
+    let monitor_card = Arc::clone(&card_access);
+    if thread::Builder::new()
+        .name("grkit-card".into())
+        .spawn(move || {
+            let card = Card::new(grkit_core::card::LINUX_CARD);
+            loop {
+                if let Ok(_guard) = monitor_card.try_lock() {
+                    if matches!(
+                        monitor.poll_card_identity(std::path::Path::new(
+                            grkit_core::card::LINUX_CARD,
+                        )),
+                        Ok(Some(_))
+                    ) {
+                        // A retained query namespace alone does not authenticate
+                        // software state read from the currently mounted medium.
+                        let _ = monitor.observe_software(&card);
+                    }
+                }
+                thread::sleep(Duration::from_secs(1));
+            }
+        })
+        .is_err()
+    {
+        return ExitCode::FAILURE;
+    }
+    let connections = Arc::new(AtomicUsize::new(0));
+    let upload = Arc::new(Mutex::new(()));
     loop {
         match listener.accept() {
             Ok((mut stream, _)) => {
-                // An error ends only this connection.
-                let _ = serve(&mut stream);
+                let Some(slot) = ConnectionSlot::acquire(&connections) else {
+                    // Do not let an overloaded peer block the accept loop.
+                    continue;
+                };
+                let service = Arc::clone(&service);
+                let card_access = Arc::clone(&card_access);
+                let upload = Arc::clone(&upload);
+                let _ = thread::Builder::new()
+                    .name("grkit-http".into())
+                    .spawn(move || {
+                        let _slot = slot;
+                        let _ = serve(&mut stream, &card_access, &upload, &service);
+                    });
             }
             Err(_) => thread::sleep(ACCEPT_PAUSE),
         }
@@ -85,25 +143,67 @@ fn run_from_ram() -> io::Result<()> {
     unreachable!("the service runs in place")
 }
 
-fn serve(stream: &mut TcpStream) -> io::Result<()> {
+fn serve(
+    stream: &mut TcpStream,
+    card_access: &Mutex<()>,
+    upload: &Mutex<()>,
+    service: &Service,
+) -> io::Result<()> {
     stream.set_read_timeout(Some(PEER_TIMEOUT))?;
     stream.set_write_timeout(Some(PEER_TIMEOUT))?;
     let connection = Connection {
         local: stream.local_addr()?.to_string(),
         peer: stream.peer_addr()?.to_string(),
     };
-    let mut bytes = read_head(stream)?;
-    let response = match parse(&bytes) {
-        None => Response::error(400, "bad request"),
+    let local = stream.local_addr()?;
+    let mut reader = DeadlineReader::new(stream);
+    let mut bytes = read_head(&mut reader)?;
+    let response: Reply = match parse(&bytes) {
+        None => Response::error(400, "bad request").into(),
         Some(request) if request.length > MAX_PACKAGE => {
-            Response::error(413, "the package is too large")
+            Response::error(413, "the package is too large").into()
         }
         Some(request) => {
+            if let Err(response) = admit(&request, local) {
+                stream.write_all(&response.to_bytes())?;
+                return stream.shutdown(Shutdown::Both);
+            }
+            if request.path == "/v1/changes" && request.method == "GET" {
+                let subscription = match service.changes.reserve() {
+                    Ok(subscription) => subscription,
+                    Err(problem) => {
+                        stream.write_all(&Reply::problem(problem).to_bytes())?;
+                        return stream.shutdown(Shutdown::Both);
+                    }
+                };
+                let socket = stream.try_clone()?;
+                thread::Builder::new()
+                    .name("grkit-changes".into())
+                    .spawn(move || {
+                        let _ = subscription.serve(socket, bytes);
+                    })?;
+                return Ok(());
+            }
+            // Only one body can occupy the package budget. Reads do not
+            // acquire this lock and remain available during a slow upload.
+            let _upload = if request.method != "GET" || request.length > 0 {
+                match upload.try_lock() {
+                    Ok(guard) => Some(guard),
+                    Err(_) => {
+                        stream.write_all(
+                            &Response::error(409, "An upload is already active").to_bytes(),
+                        )?;
+                        return stream.shutdown(Shutdown::Both);
+                    }
+                }
+            } else {
+                None
+            };
             // The head may have brought the first bytes of the body.
             let mut body = bytes.split_off(head_end(&bytes).unwrap_or(bytes.len()));
             body.truncate(request.length);
             let rest = request.length - body.len();
-            Read::by_ref(stream)
+            Read::by_ref(&mut reader)
                 .take(rest as u64)
                 .read_to_end(&mut body)?;
             if body.len() < request.length {
@@ -116,7 +216,16 @@ fn serve(stream: &mut TcpStream) -> io::Result<()> {
                 card: &card,
                 device: &device,
             };
-            respond(&request, &body, &env)
+            if request.path == "/v1/ping" {
+                service.handle(&request, &body, &env)
+            } else {
+                // The existing update journal cannot be read midway through
+                // staging, nor can cancellation race its writer.
+                match card_access.try_lock() {
+                    Ok(_guard) => service.handle(&request, &body, &env),
+                    Err(_) => Response::error(409, "The card is busy").into(),
+                }
+            }
         }
     };
     stream.write_all(&response.to_bytes())?;
@@ -131,17 +240,22 @@ fn device() -> anyhow::Result<Device> {
         .context("The camera's Wi-Fi API is not ready")?;
     stream.set_read_timeout(Some(PEER_TIMEOUT))?;
     stream.write_all(b"GET /v1/props HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")?;
+    let mut reader = DeadlineReader::new(&mut stream);
     let mut answer = Vec::new();
     // The API may keep the connection open after its answer: stop at the end
     // of the JSON body.
     let mut buffer = [0; 4096];
     loop {
-        match stream.read(&mut buffer) {
+        match reader.read(&mut buffer) {
             Ok(0) => break,
             Ok(count) => answer.extend_from_slice(&buffer[..count]),
             Err(error) if answer.is_empty() => return Err(error.into()),
             Err(_) => break,
         }
+        anyhow::ensure!(
+            answer.len() <= grkit_serve::MAX_FILE,
+            "The camera properties response is too large"
+        );
         if let Some(at) = head_end(&answer) {
             if serde_json::from_slice::<serde_json::Value>(&answer[at..]).is_ok() {
                 break;
@@ -161,6 +275,11 @@ fn device() -> anyhow::Result<Device> {
         model: text("model")?,
         firmware: text("firmwareVersion")?,
         free_bytes: free_bytes(grkit_core::card::LINUX_CARD),
+        serial_number: props["serialNo"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned),
     })
 }
 
@@ -183,4 +302,72 @@ fn free_bytes(path: &str) -> Option<u64> {
 #[cfg(not(target_os = "linux"))]
 fn free_bytes(_path: &str) -> Option<u64> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn receiving_upload_excludes_bodyless_cancel_and_rollback() {
+        for (method, path) in [("POST", "/v1/update/cancel"), ("POST", "/v1/rollback")] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let upload = Arc::new(Mutex::new(()));
+            let receiving = upload.lock().unwrap();
+            let worker_upload = Arc::clone(&upload);
+            let worker = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                serve(
+                    &mut stream,
+                    &Mutex::new(()),
+                    &worker_upload,
+                    &Service::new("test".into()),
+                )
+                .unwrap();
+            });
+            let mut client = TcpStream::connect(address).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            write!(client, "{method} {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nX-GRKit-Request-Id: 550e8400-e29b-41d4-a716-446655440000\r\n\r\n").unwrap();
+            let mut answer = String::new();
+            client.read_to_string(&mut answer).unwrap();
+            assert!(answer.starts_with("HTTP/1.1 409"), "{answer}");
+            worker.join().unwrap();
+            drop(receiving);
+        }
+    }
+
+    #[test]
+    fn incomplete_upload_does_not_block_ping() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let card = Arc::new(Mutex::new(()));
+        let upload = Arc::new(Mutex::new(()));
+        let server = thread::spawn(move || {
+            let mut workers = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let card = Arc::clone(&card);
+                let upload = Arc::clone(&upload);
+                workers.push(thread::spawn(move || {
+                    serve(&mut stream, &card, &upload, &Service::new("test".into()))
+                }));
+            }
+            for worker in workers {
+                let _ = worker.join().unwrap();
+            }
+        });
+        let mut slow = TcpStream::connect(address).unwrap();
+        write!(slow, "PUT /v1/update HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/zip\r\nX-GRKit-Request-Id: 550e8400-e29b-41d4-a716-446655440000\r\nContent-Length: 100\r\n\r\nx").unwrap();
+        let mut ping = TcpStream::connect(address).unwrap();
+        ping.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        write!(ping, "GET /v1/ping HTTP/1.1\r\nHost: {address}\r\n\r\n").unwrap();
+        let mut answer = String::new();
+        ping.read_to_string(&mut answer).unwrap();
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+        slow.shutdown(Shutdown::Both).unwrap();
+        server.join().unwrap();
+    }
 }

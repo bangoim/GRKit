@@ -1,6 +1,10 @@
 #include <assert.h>
 #include <stdint.h>
 #include <string.h>
+#include "abi.h"
+
+#define TEST_RECORDS 0x70000000U
+static uint32_t record_readers;
 
 #define TEST_OWNER 0x1000U
 #define TEST_CANVAS 0x2000U
@@ -39,6 +43,10 @@ static uint32_t view_memory[(TEST_VIEW_COUNT*TEST_VIEW_SIZE+0x100)/4];
 
 static void *mapped(uint32_t address, uint32_t bytes)
 {
+    if (address == TEST_RECORDS + GRKIT_GLOBAL_RECORD_READERS) {
+        assert(bytes == sizeof(record_readers));
+        return &record_readers;
+    }
     uint32_t *object, size = sizeof(canvas_memory);
     if (address >= TEST_VIEWS && address < TEST_VIEWS + sizeof(view_memory)) {
         object = view_memory; address -= TEST_VIEWS; size = sizeof(view_memory);
@@ -107,7 +115,6 @@ static uint32_t local_second;
    that playback finds for it, written by the test runner from
    grkit_core::aspect::geometry (crop_sizes, crop_files). */
 #include "crop_sizes.h"
-#define TEST_RECORDS 0x70000000U
 #define TEST_LABELS (TEST_RECORDS+GRKIT_PICTURE_SCRATCH+GRKIT_TEXT_SIZE)
 static const volatile uint8_t *mapped_labels(uint32_t address)
 {
@@ -165,7 +172,7 @@ static uint32_t level_updates, level_updated;
    component for the shooting screen: their count and the last event. */
 #define TEST_SERVICES 0x58000000U
 #define TEST_CORE_ENTRY 0x57000001U
-static uint32_t services_memory[0x2000];
+static uint32_t services_memory[0x9000];
 static volatile uint32_t *mapped_services(uint32_t address)
 {
     assert(address >= TEST_SERVICES && address < TEST_SERVICES + sizeof(services_memory) && (address & 3) == 0);
@@ -282,6 +289,7 @@ static const u32 capture_ids[] = {0, 2, 2, 1, 2, 1, 1, 1, 1};
 
 static void reset(void)
 {
+    assert(record_readers == 0);
     memset((void *)header, 0, sizeof(header));
     memset(owner_memory, 0, sizeof(owner_memory));
     memset(canvas_memory, 0, sizeof(canvas_memory));
@@ -661,6 +669,7 @@ static void status_icons_follow_enable_strength_and_disp(void)
     header[GRKIT_HOST_FRAME_RATIO/4]=0;
     header[GRKIT_HOST_INDICATOR_COUNT/4]=2;
     header[GRKIT_HOST_ICON_CHUNKS/4]=TEST_ICONS;
+    header[GRKIT_HOST_ICON_CHUNKS/4+2]=TEST_ICONS;
     settings_memory[0]=4;
     for(u32 i=0;i<4;++i) {
         settings_memory[SETTINGS_ENTRY(i)+1]=i%2 ? 0 : 1;
@@ -736,6 +745,7 @@ static void status_row_lays_out_core_labels(void)
     header[GRKIT_HOST_FRAME_RATIO/4]=0;
     header[GRKIT_HOST_INDICATOR_COUNT/4]=2;
     header[GRKIT_HOST_ICON_CHUNKS/4]=TEST_ICONS;
+    header[GRKIT_HOST_ICON_CHUNKS/4+2]=TEST_ICONS;
     settings_memory[0]=4;
     for(u32 i=0;i<4;++i) {
         settings_memory[SETTINGS_ENTRY(i)+1]=i%2 ? 0 : 1;
@@ -825,6 +835,7 @@ static void status_row_avoids_native_views(void)
     header[GRKIT_HOST_FRAME_RATIO/4]=0;
     header[GRKIT_HOST_INDICATOR_COUNT/4]=2;
     header[GRKIT_HOST_ICON_CHUNKS/4]=TEST_ICONS;
+    header[GRKIT_HOST_ICON_CHUNKS/4+2]=TEST_ICONS;
     settings_memory[0]=4;
     for(u32 i=0;i<4;++i) {
         settings_memory[SETTINGS_ENTRY(i)+1]=i%2 ? 0 : 1;

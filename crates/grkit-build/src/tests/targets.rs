@@ -46,6 +46,7 @@ fn core_span_covers_payloads_and_rejects_invalid_bounds() -> Result<()> {
         references: vec![],
         exports: vec![],
         viewfinder: 0,
+        library_owner: 0,
     };
     assert_eq!(plan.core_size(tail)?, 0xd300);
     validate_plan(&plan)?;
@@ -188,6 +189,18 @@ fn header_definitions(path: &str, own: bool) -> BTreeMap<String, String> {
 /// those builds differs. The runtime tests each with `#ifdef`.
 const BUILD_ONLY_DEFINITIONS: &[(&str, &[&str])] = &[
     (
+        "gr3-2.21",
+        &[
+            "FW_CONTROLLER_MANAGER",
+            "FW_CURRENT_CONTROLLER",
+            "LOOK_PUBLISH_CURRENT_CONTROLLER(h)",
+            "FW_CAPTURE_REQUEST_PENDING",
+            "FW_ALL_IMAGE_WRITES_COMPLETE",
+            "FW_BE_STILL_PROCESS",
+            "FW_BE_ACTIVE_RECIPE_COUNT",
+        ],
+    ),
+    (
         "gr4-1.20",
         &["NATIVE_ICON_LIMIT", "NATIVE_MONOCHROME_TYPES_HIGH"],
     ),
@@ -209,7 +222,10 @@ fn builds_of_a_family_have_its_hooks_and_the_same_definitions() {
         assert_eq!(symbols.len(), hooks.len(), "{}", target.family.name);
         let first = target::TARGETS
             .iter()
-            .find(|other| other.family.name == target.family.name)
+            .find(|other| {
+                other.family.name == target.family.name
+                    && other.family.definition == target.family.definition
+            })
             .unwrap();
         assert!(std::ptr::eq(target.family, first.family), "{}", target.name);
         let (layout, first_layout) = (target.layout, first.layout);

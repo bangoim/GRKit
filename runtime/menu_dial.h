@@ -1,5 +1,6 @@
 #ifndef GRKIT_MENU_DIAL_H
 #define GRKIT_MENU_DIAL_H
+#include "look_guard.h"
 /* The Mode Dial row of GRKit Settings in MENU (runtime/menu_settings.h:
    CORE_PAGE): what each position of the mode dial does
    (runtime/mode_dial.h). The row always shows: the dial belongs to the
@@ -109,6 +110,7 @@ static u32 dial_append_value(volatile u32 *h,u32 row,volatile u16 *to,u32 at,u32
 /* Set row `row` to value `value`, which is not Save Current Settings: the
    file of the user modes saves, and the position acts at once. */
 static void dial_row_set(volatile u32 *h,u32 row,u32 value) {
+    if(!GRKIT_LOOK_MUTATION_ALLOWED(h)) return;
     u32 u=dial_row_user(row), next;
     volatile u32 *at;
     if(u) {

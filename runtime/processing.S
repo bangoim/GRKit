@@ -2,7 +2,7 @@
 // the parts that each family shares. The header fields are those of abi.h.
 // The firmware addresses are FIRMWARE() symbols of the build header (hooks.h
 // and runtime/firmware.h), which the installer relocates.
-// Records are immutable, contiguous GRKIT_RECORD_SIZE allocations retained until reboot.
+// Logical records use immutable banks; complete packet readers pin retirement.
 // The live-view dirty hook lives in picture.S.
 #include "firmware.h"
 #include "abi.h"
@@ -12,6 +12,7 @@
 .text
 
 // The context of the parameter build is r5, its transient object r6.
+#define GRKIT_PACKET_REFERENCES 1
 #define PROCESSING_CONTEXT r5
 #define PROCESSING_OBJECT r6
 #include "processing.h"
@@ -135,3 +136,21 @@ curves_stock:
     pop {r0, r5, r12, lr}
     ldr pc, =HOOK_MODULE_GAMMA_CURVES_TARGET
 .ltorg
+
+// Each native parameter packet is local to fp-356 of one of three tuning
+// functions. Their sole normal epilogues release its private record after
+// all synchronous stages. A native packet never increments a reference.
+module_packet_return_0:
+module_packet_return_1:
+module_packet_return_2:
+    push {r0-r3, r12, lr}
+    sub r0, fp, #356
+    ldr r0, [r0, #8]
+    bl .Lowned_record
+    bne 991f
+    mvn r1, #0
+    bl .Lpacket_reference
+991:
+    pop {r0-r3, r12, lr}
+    sub sp, fp, #40
+    ldm sp, {r4-r11, sp, pc}

@@ -153,6 +153,35 @@ menu_apply_original:
     mov r12, sp
     ldr pc, =HOOK_MENU_APPLY_RESUME
 .ltorg
+#if defined(HOOK_MENU_ICON_DRAW_ENTER) && defined(HOOK_MENU_ICON_DRAW_LEAVE)
+/* Native IconView retains only an ID. Its painter retains the resolved icon
+   on its stack until the common epilogue, so protect that entire interval. */
+.global menu_icon_draw_enter
+.type menu_icon_draw_enter, %function
+menu_icon_draw_enter:
+    push {r0-r3, r12, lr}
+    mrs r0, cpsr
+    push {r0, r1}
+    bl menu_icon_reader_enter
+    pop {r0, r1}
+    msr APSR_nzcvq, r0
+    pop {r0-r3, r12, lr}
+    mov r12, sp
+    ldr pc, =HOOK_MENU_ICON_DRAW_ENTER_RESUME
+.global menu_icon_draw_leave
+.type menu_icon_draw_leave, %function
+menu_icon_draw_leave:
+    push {r0-r3, r12, lr}
+    mrs r0, cpsr
+    push {r0, r1}
+    bl menu_icon_reader_leave
+    pop {r0, r1}
+    msr APSR_nzcvq, r0
+    pop {r0-r3, r12, lr}
+    sub sp, fp, #0x28
+    ldr pc, =HOOK_MENU_ICON_DRAW_LEAVE_RESUME
+.ltorg
+#endif
 #ifdef HOOK_MENU_ICON_WIDTH
 .global menu_icon_width
 .type menu_icon_width, %function
@@ -191,6 +220,7 @@ menu_icon_guard:
     movwne r1, #65535
     movweq r1, #670
     ldr pc, =HOOK_MENU_ICON_GUARD_RESUME
+
 .global menu_icon_descriptor
 .type menu_icon_descriptor, %function
 menu_icon_descriptor:
@@ -1059,3 +1089,32 @@ menu_dial_save:
     .inst HOOK_MENU_DIAL_SAVE_STOCK
     ldr pc, =HOOK_MENU_DIAL_SAVE_RESUME
 .ltorg
+
+/* Freestanding compiler support for resident structs. These routines use no
+   firmware calls and preserve every callee-saved register. */
+.thumb
+.thumb_func
+.global __aeabi_memcpy
+.type __aeabi_memcpy, %function
+__aeabi_memcpy:
+    cbz r2, 2f
+1:  ldrb r3, [r1], #1
+    strb r3, [r0], #1
+    subs r2, #1
+    bne 1b
+2:  bx lr
+.size __aeabi_memcpy, .-__aeabi_memcpy
+.thumb_func
+.global __aeabi_memclr4
+.type __aeabi_memclr4, %function
+.global __aeabi_memclr8
+.type __aeabi_memclr8, %function
+.thumb_set __aeabi_memclr8, __aeabi_memclr4
+__aeabi_memclr4:
+    cbz r1, 2f
+    movs r2, #0
+1:  strb r2, [r0], #1
+    subs r1, #1
+    bne 1b
+2:  bx lr
+.size __aeabi_memclr4, .-__aeabi_memclr4

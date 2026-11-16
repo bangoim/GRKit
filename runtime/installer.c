@@ -16,6 +16,8 @@ struct patch { u32 address, size, kind; const u8 *before; u8 *after; };
 /* The layout of the state of the core services. */
 #include "services.h"
 #include "install_status.h"
+#include "control_mailbox.h"
+#include "look_publish.h"
 
 /* RTOS_NATIVE builds the installer into the RTOS-side loader of
    runtime/fastboot/, whose backend.c serves the same calls without Linux. */
@@ -92,6 +94,7 @@ static const char relocation_path[] = RELOCATION_PATH;
 static volatile u8 *at(u32 physical) { return mapping + physical - MAP_BASE; }
 static u32 word(u32 p) { return *(volatile u32 *)at(p); }
 static void store(u32 p, u32 v) { *(volatile u32 *)at(p) = v; }
+#define PERSIST_WORD(p,o) word((p)+(o))
 #define PERSIST_HALF(p,o) (*(volatile u16 *)at((p)+(o)))
 #define PERSIST_BYTE(p,o) (at((p)+(o))[0])
 #define PERSIST_SETTINGS(h) ((h)[GRKIT_HOST_MODULE_SETTINGS/4] ? (volatile u32 *)at((h)[GRKIT_HOST_MODULE_SETTINGS/4]) : (volatile u32 *)0)
@@ -130,17 +133,20 @@ static u32 listed_record[EFFECTS_LISTED];
 #endif
 #include "install_library.h"
 #include "install_effects.h"
+#include "install_managed_library.h"
+#include "effect_record.h"
 /* The artwork tiles of the usable modules (plan_modules). Their icon slots
    follow the effect icons. */
 static u32 module_tiles;
 static void layout(void)
 {
-    size = GRKIT_HOST_HEADER_SIZE + count * GRKIT_RECORD_SIZE;
-    icon_chunks = (count + HOST_ICON_COUNT + module_tiles + ICONS_PER_CHUNK - 1) / ICONS_PER_CHUNK;
+    /* Reserve stable addresses before any reader can retain a record. */
+    size = GRKIT_HOST_HEADER_SIZE + MAX_COUNT * GRKIT_RECORD_SIZE;
+    icon_chunks = (2 * MAX_COUNT + HOST_ICON_COUNT + module_tiles + ICONS_PER_CHUNK - 1) / ICONS_PER_CHUNK;
 }
 static u32 chunk_count(u32 chunk)
 {
-    u32 left = count + HOST_ICON_COUNT + module_tiles - chunk * ICONS_PER_CHUNK;
+    u32 left = 2 * MAX_COUNT + HOST_ICON_COUNT + module_tiles - chunk * ICONS_PER_CHUNK;
     return left < ICONS_PER_CHUNK ? left : ICONS_PER_CHUNK;
 }
 #include "install_plan.h"
@@ -178,9 +184,7 @@ static int scan(void)
     profile_mode = present(profile_path) || present(profile_text_path);
     /* The modules first: the effects install only for a module that uses
        CORE.TONE. */
-    plan_modules();
-    collect();
-    int status = discover();
+    int status = managed_scan();
     if (status) {
         plan_files_close(fd);
         return status;
@@ -193,7 +197,7 @@ static int scan(void)
     put32(plan + GRKIT_PLAN_SIZE, effects_at + listed_count * GRKIT_PLANNED_EFFECT_SIZE);
     put32(plan + GRKIT_PLAN_MODULE_WORDS, module_words);
     put32(plan + GRKIT_PLAN_MODULE_TILES, module_tiles);
-    put32(plan + GRKIT_PLAN_MODES, (safe_mode ? GRKIT_PLAN_SAFE : 0) | (profile_mode ? GRKIT_PLAN_PROFILE : 0));
+    put32(plan + GRKIT_PLAN_MODES, (safe_mode ? GRKIT_PLAN_SAFE : 0) | (profile_mode ? GRKIT_PLAN_PROFILE : 0) | (managed_library ? GRKIT_PLAN_MANAGED : 0));
     put32(plan + GRKIT_PLAN_OVERFLOW, overflow_count);
     put32(plan + GRKIT_PLAN_LISTED, listed_count);
     for (u32 i = 0; i < count; ++i)
@@ -307,6 +311,7 @@ static void prepare_relocation(void)
     relocation.symbol_at = relocated;
     relocation.hint = 0;
     relocation.optional = window_optional;
+    relocation.required = 0;
     if (read_text(relocation_path, (u8 *)hint_words, sizeof(hint_words)) == (long)sizeof(hint_words) &&
         hint_words[0] == HINT_MAGIC && hint_words[1] == RELOCATION_WINDOW_COUNT && hint_words[2] == word(RTOS_IDENTITY))
         relocation.hint = hint_words + HINT_KEY;
@@ -405,11 +410,12 @@ static int read_plan(void)
     count = get32(plan + GRKIT_PLAN_COUNT);
     safe_mode = get32(plan + GRKIT_PLAN_MODES) & GRKIT_PLAN_SAFE;
     profile_mode = (get32(plan + GRKIT_PLAN_MODES) & GRKIT_PLAN_PROFILE) != 0;
+    managed_library = (get32(plan + GRKIT_PLAN_MODES) & GRKIT_PLAN_MANAGED) != 0;
     overflow_count = get32(plan + GRKIT_PLAN_OVERFLOW);
     listed_count = get32(plan + GRKIT_PLAN_LISTED);
     u32 effects_at = GRKIT_PLAN_HEADER_SIZE + count * GRKIT_GRF_MAX_SIZE;
     if (count > MAX_COUNT || listed_count > EFFECTS_LISTED || have != effects_at + listed_count * GRKIT_PLANNED_EFFECT_SIZE ||
-        get32(plan + GRKIT_PLAN_SIZE) != have || get32(plan + GRKIT_PLAN_MODES) > (GRKIT_PLAN_SAFE | GRKIT_PLAN_PROFILE))
+        get32(plan + GRKIT_PLAN_SIZE) != have || get32(plan + GRKIT_PLAN_MODES) > (GRKIT_PLAN_SAFE | GRKIT_PLAN_PROFILE | GRKIT_PLAN_MANAGED))
         return STATUS_PLAN;
     for (u32 i = 0; i < listed_count; ++i) {
         const u8 *entry = plan + effects_at + i * GRKIT_PLANNED_EFFECT_SIZE;
@@ -532,7 +538,7 @@ static void apply_state(u32 base, u32 table)
             /* The effect is its ImageTone code. */
             for (u32 i = 0; i < count; ++i) {
                 u32 record = base + GRKIT_HOST_HEADER_SIZE + i * GRKIT_RECORD_SIZE;
-                if (*(volatile u16 *)at(record + GRKIT_RECORD_CODE) == value) store(base + GRKIT_HOST_ACTIVE, record);
+                if (managed_selected(i) && *(volatile u16 *)at(record + GRKIT_RECORD_CODE) == value) store(base + GRKIT_HOST_ACTIVE, record);
             }
         } else if (value < values[k]) store(base + words[k], value);
     }
@@ -544,35 +550,38 @@ static void apply_state(u32 base, u32 table)
         u32 n = word(table);
         for (u32 k = 0; k < n && k < GRKIT_MODULE_SETTINGS_MAX; ++k) {
             u32 entry = table + 4 * SETTINGS_ENTRY(k), id = word(entry);
-            store(entry + 4, state_setting_value(&saved_state, id, word(entry + 4), word(entry + 8)));
+            u32 effect = 0;
+            if (managed_library) for (u32 i = 0; i < listed_count; ++i)
+                if (effect_choice_id(i) == id) effect = 1;
+            if (!effect) store(entry + 4, state_setting_value(&saved_state, id, word(entry + 4), word(entry + 8)));
         }
         sync_alias(table, 4 * SETTINGS_WORDS(n));
     }
-    /* The adjustments of an effect: base-9 digits, the first lowest. */
-    for (u32 i = 0; i < count; ++i) {
-        u32 record = base + GRKIT_HOST_HEADER_SIZE + i * GRKIT_RECORD_SIZE;
-        u32 code = *(volatile u16 *)at(record + GRKIT_RECORD_CODE) & 0x7fffU;
-        if (!state_value(&saved_state, PARAMETER_KEY_BASE + code, &value) || value > PARAMETER_VALUE_MAX) continue;
+    /* Historical native-code keys have no saved ID proof. Only the new
+       ID-bound namespace can restore adjustments, including unloaded rows. */
+    restore_listed_parameters(base,effect_list);
+    for (u32 row = 0; row < listed_count && effect_list; ++row) {
+        u32 entry = effect_list + EFFECTS_HEADER + row * EFFECTS_STRIDE;
+        u32 index = word(entry + EFFECTS_RECORD);
+        if (index >= count) continue;
+        u32 record = base + GRKIT_HOST_HEADER_SIZE + index * GRKIT_RECORD_SIZE;
+        value = word(entry + EFFECTS_PARAMETER_FN);
         for (u32 d = 0; d < 9; ++d) { at(record + GRKIT_RECORD_PARAMETERS + d)[0] = (u8)(value % 9); value /= 9; }
-    }
-    /* The Toning of each native look with its own curves in a slot. */
-    for (u32 i = 0; i < count; ++i) {
-        u32 record = base + GRKIT_HOST_HEADER_SIZE + i * GRKIT_RECORD_SIZE;
         u32 slot = at(record + GRKIT_RECORD_TONE_SLOT)[0];
-        u32 code = *(volatile u16 *)at(record + GRKIT_RECORD_CODE) & 0x7fffU;
-        if (!slot || !state_value(&saved_state, TONING_KEY_BASE + code, &value) || value > 8) continue;
+        value = word(entry + EFFECTS_PARAMETER_TONING);
+        if (!slot) continue;
         at(record + GRKIT_RECORD_TONING)[0] = (u8)value;
         toning_curves(record + GRKIT_RECORD_CURVES,
             word(base + GRKIT_HOST_TAIL) + GRKIT_TONE_CURVES + (slot - 1) * GRKIT_TONE_SLOT_SIZE, toning_value(value));
     }
 }
 /* The script arrays that the loader allocated (grkit_core::runtime::loader):
-   the registry, the icon chunks, the module array, then the tail. */
-struct arrays { u32 base, tail, module_array, icon_bases[MAX_CHUNKS]; };
+   the registry, icon chunks, module array, tail, then the second record bank. */
+struct arrays { u32 base, tail, module_array, bank2, icon_bases[MAX_CHUNKS]; };
 /* Check that each array has its planned size and that no two overlap. */
 static int check_arrays(struct arrays *a)
 {
-    if (*(volatile u16 *)at(ARRAY_COUNT) != ARRAY_LEAD + 2 + icon_chunks + (module_words != 0) || word(ARRAYS) != size / 4) return STATUS_ARRAYS;
+    if (*(volatile u16 *)at(ARRAY_COUNT) != ARRAY_LEAD + 3 + icon_chunks + (module_words != 0) || word(ARRAYS) != size / 4) return STATUS_ARRAYS;
     u32 base = a->base = word(ARRAYS + 4), *icon_bases = a->icon_bases;
     if (!heap(base, size)) return STATUS_ARRAY_MEMORY;
     for (u32 i = 0; i < icon_chunks; ++i) {
@@ -601,6 +610,14 @@ static int check_arrays(struct arrays *a)
         (module_array && tail < module_array + module_words * 4 && module_array < tail + GRKIT_TAIL_SIZE)) return STATUS_ARRAY_MEMORY;
     for (u32 j = 0; j < icon_chunks; ++j)
         if (tail < icon_bases[j] + chunk_count(j) * ICON_STRIDE && icon_bases[j] < tail + GRKIT_TAIL_SIZE) return STATUS_ARRAY_MEMORY;
+    u32 entry = ARRAYS + (2 + icon_chunks + (module_words != 0)) * 8;
+    u32 bank2 = a->bank2 = word(entry + 4), bytes = MAX_COUNT * GRKIT_RECORD_SIZE;
+    if (word(entry) != bytes / 4 || !heap(bank2, bytes) ||
+        (bank2 < base + size && base < bank2 + bytes) ||
+        (bank2 < tail + GRKIT_TAIL_SIZE && tail < bank2 + bytes) ||
+        (module_array && bank2 < module_array + module_words * 4 && module_array < bank2 + bytes)) return STATUS_ARRAY_MEMORY;
+    for (u32 j = 0; j < icon_chunks; ++j)
+        if (bank2 < icon_bases[j] + chunk_count(j) * ICON_STRIDE && icon_bases[j] < bank2 + bytes) return STATUS_ARRAY_MEMORY;
     return 0;
 }
 
@@ -676,6 +693,8 @@ static void write_header(const struct arrays *a)
 {
     u32 base = a->base, tail = a->tail;
     zero(at(base), size);
+    zero(at(a->bank2), MAX_COUNT * GRKIT_RECORD_SIZE);
+    store(base + GRKIT_HOST_RECORD_BANK2, a->bank2);
     store(base + GRKIT_HOST_COUNT, count); store(base + GRKIT_HOST_RECORDS, base + GRKIT_HOST_HEADER_SIZE);
     store(base + GRKIT_HOST_TAIL, tail);
     store(base + GRKIT_HOST_MAGIC, GRKIT_HOST_MAGIC_VALUE); store(base + GRKIT_HOST_VERSION, GRKIT_HOST_VERSION_VALUE);
@@ -684,6 +703,7 @@ static void write_header(const struct arrays *a)
     /* The shot ring of the picture hooks (runtime/picture.c) starts empty. The
        tail holds noise after power-on, and after a soft reset the ring of the
        last start, whose keys a new shot could match. */
+    zero(at(tail + GRKIT_RECORD_PINS), GRKIT_RECORD_PINS_SIZE);
     zero(at(tail + GRKIT_SHOT_RING), GRKIT_SHOT_ENTRY + GRKIT_SHOT_ENTRIES * GRKIT_SHOT_STRIDE);
     zero(at(tail + GRKIT_CANVAS_TABLE), GRKIT_CANVAS_ENTRIES * GRKIT_CANVAS_ENTRY_SIZE);
     for (u32 i = 0; i < icon_chunks; ++i) {
@@ -709,25 +729,8 @@ static void write_records(const struct arrays *a, u32 pixels)
     for (u32 i = 0; i < count; ++i) {
         u32 record = base + GRKIT_HOST_HEADER_SIZE + i * GRKIT_RECORD_SIZE;
         const u8 *profile = profiles[i];
-        copy(at(record), (const u8 *)at(STOCK_RECORD), GRKIT_RECORD_COEFFICIENTS);
-        store(record + 4, record + GRKIT_RECORD_COEFFICIENTS);
-        /* The matrix and the curves, which the coefficients hold as the GRF
-           does (grkit_core::abi). */
-        copy(at(record + GRKIT_RECORD_COEFFICIENTS), profile + GRKIT_GRF_MATRIX, GRKIT_GRF_ICON - GRKIT_GRF_MATRIX);
-        /* Extension: features, then the post matrix, selective color, and the
-           reserved zero bytes. */
-        copy(at(record + GRKIT_RECORD_FEATURES), profile + GRKIT_GRF_FEATURES, GRKIT_GRF_FEATURES_SIZE);
-        copy(at(record + GRKIT_RECORD_POST), profile + GRKIT_GRF_POST, GRKIT_GRF_MATRIX - GRKIT_GRF_POST);
+        effect_record_prepare(at(record),(const u8 *)at(STOCK_RECORD),profile,record,0,0);
         if (get32(profile + GRKIT_GRF_FEATURES) & (GRKIT_FEATURE_HUE | GRKIT_FEATURE_NATIVE_LOOK)) multiaxial(record, profile);
-        /* Neutral Fn adjustments until the loader restores the saved ones, and
-           the defaults that they change: those of feature 64, as values mod 9
-           like a stored adjustment, else zero. */
-        zero(at(record + GRKIT_RECORD_PARAMETERS), 9);
-        for (u32 k = 0; k < 9; ++k) {
-            int value = (get32(profile + GRKIT_GRF_FEATURES) & GRKIT_FEATURE_FN_DEFAULTS)
-                ? (signed char)profile[GRKIT_GRF_FN_DEFAULTS + k] : 0;
-            at(record + GRKIT_RECORD_FN_DEFAULTS + k)[0] = (u8)(value < 0 ? value + 9 : value);
-        }
         /* Toning (runtime/toning.h): a native look whose red or blue curve
            differs from green keeps those curves in the next tail slot, and
            starts at its own toning. */
@@ -741,9 +744,6 @@ static void write_records(const struct arrays *a, u32 pixels)
             at(record + GRKIT_RECORD_TONE_SLOT)[0] = (u8)++tone_slots;
         }
         u32 n = length((const char *)profile + CATALOG_EFFECT_NAME);
-        for (u32 j = 0; j < n; ++j) at(record + GRKIT_RECORD_NAME + j * 2)[0] = profile[CATALOG_EFFECT_NAME + j];
-        store(record + GRKIT_RECORD_MONOCHROME, get32(profile + GRKIT_GRF_FLAGS));
-        copy(at(record + GRKIT_RECORD_ID), profile + GRKIT_GRF_ID, GRKIT_GRF_ID_SIZE);
         /* The Image Control summary in each language: the prefix, then the name. */
         for (u32 language = 0; language < GRKIT_TEXT_LANGUAGES; ++language) {
             volatile u16 *summary = (volatile u16 *)at(text + GRKIT_TEXT_SUMMARY +
@@ -814,6 +814,7 @@ static int write_modules(const struct arrays *a, u32 pixels, u32 code)
     store(base + GRKIT_HOST_SERVICES, services_block);
     store(base + GRKIT_HOST_MODULE_SETTINGS, a->module_array);
     store(base + GRKIT_HOST_PERSIST_WORD, (services_block + SERVICES_PERSIST - a->module_array) / 4U);
+    store(base + GRKIT_HOST_CONTROL_WORD, (SERVICES_CONTROL_ADDRESS(services_block) - a->module_array) / 4U);
     store(base + GRKIT_HOST_CAPABILITIES, capabilities_running);
     store(base + GRKIT_HOST_MODULE_PAGE_COUNT, module_page_count);
     for (u32 i = 0; i < module_page_count * 3; ++i) store(base + GRKIT_HOST_MODULE_PAGES + i * 4, module_pages[i]);
@@ -914,8 +915,42 @@ static int install(void)
     install_manage_copy(arrays.base, module_count ? arrays.module_array : 0);
     if (module_count) {
         u32 persist = services_block + SERVICES_PERSIST;
+        if(!sync_alias(effect_list,4*EFFECT_LIST_WORDS(EFFECTS_LISTED))) return STATUS_SYNC;
         persist_baseline((volatile u32 *)at(arrays.base), (volatile u32 *)at(persist));
         if (!sync_alias(persist, GRKIT_PERSIST_SIZE)) return STATUS_SYNC;
+        const u32 epoch[4]={0,0,0,0};
+        u32 control=SERVICES_CONTROL_ADDRESS(services_block);
+        control_init((volatile struct control_mailbox *)at(control),epoch,1);
+#if defined(RTOS_NATIVE)
+        store(control+GRKIT_CONTROL_OWNER_ENTRY,relocated[TAIL_SYMBOL]+CORE_LIBRARY_OWNER);
+        store(control+GRKIT_CONTROL_OWNER_STATE,services_block+SERVICES_LIBRARY_OWNER);
+#endif
+#ifndef GRKIT_NO_IMAGE_CONTROL
+        /* App prepares unpublished records from the validated stock template. */
+        for(u32 i=0;i<GRKIT_RECORD_COEFFICIENTS;++i)
+            at(services_block+SERVICES_LOOK_PUBLISH)[i]=at(STOCK_RECORD)[i];
+        for(u32 i=0;i<listed_count;++i)
+            for(u32 j=0;j<32;++j)
+                at(services_block+SERVICES_LOOK_IDS+i*32U)[j]=listed[i][GRKIT_GRF_ID+j];
+        if(!sync_alias(services_block+SERVICES_LOOK_IDS,SERVICES_LOOK_IDS_SIZE)) return STATUS_SYNC;
+        for(u32 i=0;i<count;++i) {
+            u8 digest[32];
+            if(!library_sha256(profiles[i],get32(profiles[i]+GRKIT_GRF_BYTES),digest)) return STATUS_PLAN;
+            copy(at(services_block+SERVICES_LOOK_HASHES+i*32U),digest,32);
+        }
+        if(!sync_alias(services_block+SERVICES_LOOK_HASHES,SERVICES_LOOK_HASHES_SIZE)) return STATUS_SYNC;
+        struct look_publish *publish=(struct look_publish *)at(services_block+SERVICES_LOOK_PUBLISH);
+        u32 native=word(TABLE_ADDRESS(1)+11U*4U);
+        publish->multiaxial_regions=word(native+12U);
+        publish->multiaxial_rgb=word(native+20U);
+        if(!sync_alias(services_block+SERVICES_LOOK_PUBLISH,SERVICES_LOOK_PUBLISH_SIZE)) return STATUS_SYNC;
+#endif
+#ifdef RTOS_NATIVE
+        /* No producer can attach before publication. Initialize every line at
+           PoC once; fastboot sync_alias only cleans executable code to PoU. */
+        CONTROL_CLEAN((volatile void *)at(control),GRKIT_CONTROL_SIZE);
+#endif
+        if (!sync_alias(control, GRKIT_CONTROL_SIZE)) return STATUS_SYNC;
     }
     check_recipes(arrays.base, count, module_count ? arrays.module_array : 0, capabilities_running);
     for (u32 i = 0; i < CODE_RELOCATION_COUNT; ++i) {
@@ -923,6 +958,7 @@ static int install(void)
         put32(patches[patch_index].after + offset, arrays.base);
     }
     if (!sync_alias(arrays.base, size)) return STATUS_SYNC;
+    if (!sync_alias(arrays.bank2, MAX_COUNT * GRKIT_RECORD_SIZE)) return STATUS_SYNC;
     if (!sync_alias(arrays.tail, GRKIT_TAIL_SIZE)) return STATUS_SYNC;
     for (u32 i = 0; i < icon_chunks; ++i)
         if (!sync_alias(arrays.icon_bases[i], chunk_count(i) * ICON_STRIDE)) return STATUS_SYNC;
@@ -930,6 +966,63 @@ static int install(void)
     print("GR_MODULE_INSTALLED "); number(count); print("\n");
     return 0;
 }
+#ifndef RTOS_NATIVE
+/* Discover a live mailbox from the interpreter's current array table. The
+   pointers in a header are insufficient: prove the complete mailbox lies in
+   the module array that the resident loader still owns. This path only reads. */
+static int control_info(void)
+{
+    u8 required[RELOCATION_SYMBOL_COUNT];
+    zero(required,sizeof(required));
+    required[ARRAY_COUNT_SYMBOL]=required[ARRAY_TABLE_SYMBOL]=required[HEAP_MIN_SYMBOL]=1;
+    relocation.read=read_word;
+    relocation.window_at=window_at;
+    relocation.symbol_at=relocated;
+    relocation.required=required;
+    if(!relocation_resolve(&relocation_tables,&relocation)) return STATUS_RELOCATION;
+    u32 n=*(volatile u16 *)at(ARRAY_COUNT), i, module_words_live=0;
+    if(n<ARRAY_LEAD+3 || n>ARRAY_LEAD+4+MAX_CHUNKS) return STATUS_NO_HEADER;
+    u32 base=word(ARRAYS+4);
+    if(!heap(base,GRKIT_HOST_HEADER_SIZE) || word(base+GRKIT_HOST_MAGIC)!=GRKIT_HOST_MAGIC_VALUE ||
+       word(base+GRKIT_HOST_VERSION)!=GRKIT_HOST_VERSION_VALUE) return STATUS_NO_HEADER;
+    u32 module=word(base+GRKIT_HOST_MODULE_SETTINGS), offset=word(base+GRKIT_HOST_CONTROL_WORD);
+    u32 services=word(base+GRKIT_HOST_SERVICES);
+    if(!module || !offset) return STATUS_NO_HEADER;
+    for(i=ARRAY_LEAD;i<n;++i) if(word(ARRAY_TABLE+8*i+4)==module) {
+        module_words_live=word(ARRAY_TABLE+8*i); break;
+    }
+    if(!module_words_live || module_words_live>(HEAP_END-HEAP_MIN)/4 ||
+       !heap(module,module_words_live*4) || offset>module_words_live ||
+       GRKIT_CONTROL_WORDS>module_words_live-offset) return STATUS_NO_HEADER;
+    u32 control=module+offset*4;
+    if(services<module || services>control || control!=SERVICES_CONTROL_ADDRESS(services) ||
+       word(control+GRKIT_CONTROL_MAGIC)!=GRKIT_CONTROL_MAGIC_VALUE ||
+       word(control+GRKIT_CONTROL_VERSION)!=GRKIT_CONTROL_VERSION_VALUE ||
+       word(control+GRKIT_CONTROL_CAPACITY)!=GRKIT_CONTROL_PAYLOAD_BYTES) return STATUS_NO_HEADER;
+    print("{\"headerAddress\":"); number(base);
+    print(",\"mailboxAddress\":"); number(control);
+    print(",\"mailboxSize\":"); number(GRKIT_CONTROL_SIZE);
+    print(",\"mailboxVersion\":"); number(GRKIT_CONTROL_VERSION_VALUE);
+    print(",\"epoch\":[");
+    for(i=0;i<4;++i) { if(i) print(","); number(word(control+GRKIT_CONTROL_EPOCH+4*i)); }
+    print("]}\n");
+    return 0;
+}
+static int control_discover(void)
+{
+    long fd=syscall6(5,(u32)"/dev/mem",0x101000,0,0,0,0);
+    if(fd<0) return STATUS_NO_MEMORY;
+    long mapped=syscall6(192,0,MAP_SIZE,1,1,fd,MAP_BASE>>12);
+    int status=STATUS_NO_MAPPING;
+    if((u32)mapped<0xfffff001U) {
+        mapping=(volatile u8 *)mapped;
+        status=control_info();
+        syscall6(91,(u32)mapping,MAP_SIZE,0,0,0,0);
+    }
+    syscall6(6,fd,0,0,0,0,0);
+    return status;
+}
+#endif
 #ifdef MODULE_DIAGNOSTICS
 /* Diagnostic builds can select profiles independently of the menu. */
 static int select_profile(const char *id)
@@ -1052,6 +1145,10 @@ __attribute__((used)) void start(u32 *stack)
     if (argc == 2 && text_equal(argv[1], "--known")) mode = INSTALL_KNOWN;
     else if (argc == 2 && text_equal(argv[1], "--try")) mode = INSTALL_TRY;
     int installing = argc == 2 && (mode != INSTALL_LAST || text_equal(argv[1], "--install"));
+#ifndef RTOS_NATIVE
+    if (argc == 2 && text_equal(argv[1], "--control-info")) status = control_discover();
+    else
+#endif
     if (argc == 2 && text_equal(argv[1], "--scan")) status = scan();
     else if (installing
 #ifdef MODULE_DIAGNOSTICS

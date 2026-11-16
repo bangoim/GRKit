@@ -21,4 +21,13 @@
 #define RT_FS_CLOSEDIR 0x53ac4560  /* closedir(dNo) */
 #define RT_FS_RENAME 0x53ac4644  /* rename(source, destination) -> 0 */
 
+/* Read-only SD identity through the native media manager and SdDriver. */
+#define RT_CARD_MANAGER 0x5537fbe4U
+#define RT_CARD_ENTRY_SIZE 0x0000001cU
+#define RT_CARD_VTABLE 0x54388ad8U
+/* +0x2c is WRITE (CMD24); +0x30 reaches CMD18 with TransferMode.READ. */
+#define RT_CARD_READ_SLOT 0x30U
+#define RT_CARD_READ 0x53a75774U
+#define RT_CARD_CID 0x550764e0U
+
 #endif

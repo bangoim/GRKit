@@ -10,6 +10,7 @@ fn generated_header_matches_fixed_synthetic_contract() -> Result<()> {
     let plan = PatchPlan {
         exports: vec![],
         viewfinder: 0,
+        library_owner: 0,
         patches: vec![
             Patch {
                 address: 0x53002080,
@@ -83,6 +84,7 @@ fn generated_header_keeps_module_start_and_relocation_span_in_sync() -> Result<(
             references: vec![],
             exports: vec![],
             viewfinder: 0,
+            library_owner: 0,
         };
         validate_plan(&plan)?;
         let header = loader::header(&plan, &body, TEST_VERSION)?;
@@ -106,6 +108,7 @@ fn generated_header_marks_only_rtos_tail_patches_as_unchecked() -> Result<()> {
     let plan = PatchPlan {
         exports: vec![],
         viewfinder: 0,
+        library_owner: 0,
         patches: vec![
             Patch {
                 address: 0x53002080,
@@ -136,6 +139,7 @@ fn generated_header_gives_the_points_of_each_patch() -> Result<()> {
     let plan = PatchPlan {
         exports: vec![],
         viewfinder: 0,
+        library_owner: 0,
         patches: vec![
             Patch {
                 address: target::GR3_210.layout.tail,
@@ -206,7 +210,7 @@ fn menu_assembly_symbols_are_typed_functions() {
 #[test]
 fn production_scripts_and_activation_match_fixed_contracts() {
     let files = grkit_core::runtime::runtime_files(b"ELF");
-    assert_eq!(files.len(), 6);
+    assert_eq!(files.len(), 7);
     assert_eq!(files["SCRIPT/GRKIT/CORE.BIN"], b"ELF");
     for (path, name) in [
         ("SCRIPT/STARTUP.TTL", "STARTUP.TTL"),

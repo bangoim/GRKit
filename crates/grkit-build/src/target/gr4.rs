@@ -20,10 +20,26 @@ use crate::components::{
 
 pub const FAMILY: Family = Family {
     name: "gr4",
+    definition: "FAMILY",
     hooks: HOOKS,
     processing_source: Some(include_str!("../../../../runtime/targets/gr4-processing.S")),
     scale_one_column: 1,
 };
+
+// Only 1.21 has the complete native reader lifetimes verified so far.
+// Earlier builds retain their existing hooks and cannot publish hot changes.
+pub const READER_FAMILY: Family = Family {
+    definition: "READER_FAMILY",
+    hooks: &join::<{ HOOKS.len() + READERS.len() }>(&[HOOKS, READERS]),
+    ..FAMILY
+};
+const READERS: &[HookSpec] = &[
+    b("module_packet_return_0", Processing, Tuning),
+    b("module_packet_return_1", Processing, Tuning),
+    b("module_packet_return_2", Processing, Tuning),
+    b("menu_icon_draw_enter", Menu, MenuPage),
+    b("menu_icon_draw_leave", Menu, MenuPage),
+];
 
 const HOOKS: &[HookSpec] = &join::<{ len(GROUPS) }>(GROUPS);
 

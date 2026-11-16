@@ -3,8 +3,7 @@
 //! power-on (`grkit_core::runtime::package_runtime_files_with`).
 //!
 //! The service answers one request on each connection and then closes it. It
-//! waits in `accept` between connections, so it uses no CPU time while no
-//! phone connects. Every path starts with `/v<PROTOCOL>/`. The port has no
+//! admits a bounded number of connections and waits in `accept` between them. Every path starts with `/v<PROTOCOL>/`. The port has no
 //! other service, so the paths do not name GRKit.
 //!
 //! - `GET status`: the GRKit version, the Linux uptime, and the boot log
@@ -30,6 +29,17 @@
 //! The service takes no `POST`: a web page can send a `POST` to another
 //! address without the browser asking the service first, but not a `PUT`.
 
+pub mod api;
+pub mod changes;
+pub mod control;
+pub mod identity;
+pub mod library;
+pub mod look_api;
+pub mod looks;
+pub mod protocol;
+pub mod runtime_backend;
+pub mod transport;
+pub mod trust;
 pub mod update;
 
 use grkit_core::{card::LINUX_DATA_DIRECTORY, runtime::BOOT_LOG};
@@ -93,12 +103,14 @@ pub struct Connection {
 }
 
 /// A request that the service accepts: the method, the path without the
-/// query, and the length of its body.
+/// query, its query and headers, and the length of its body.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Request {
     pub method: String,
     pub path: String,
     pub length: usize,
+    pub query: Option<String>,
+    pub headers: std::collections::BTreeMap<String, String>,
 }
 
 /// What a request can change and read besides the files: the card and the
@@ -121,7 +133,8 @@ impl Response {
     pub fn error(status: u16, message: &str) -> Self {
         Response {
             status,
-            body: json!({ "error": message }),
+            body: serde_json::to_value(protocol::Problem::new(status, error_code(status), message))
+                .expect("problem serializes"),
         }
     }
 
@@ -129,17 +142,14 @@ impl Response {
     /// after them.
     pub fn to_bytes(&self) -> Vec<u8> {
         let body = self.body.to_string();
-        let reason = match self.status {
-            200 => "OK",
-            400 => "Bad Request",
-            404 => "Not Found",
-            405 => "Method Not Allowed",
-            413 => "Content Too Large",
-            503 => "Service Unavailable",
-            _ => "Error",
+        let reason = reason(self.status);
+        let content_type = if self.status >= 400 {
+            "application/problem+json"
+        } else {
+            "application/json"
         };
         format!(
-            "HTTP/1.1 {} {reason}\r\nContent-Type: application/json\r\n\
+            "HTTP/1.1 {} {reason}\r\nContent-Type: {content_type}\r\n\
              Content-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
             self.status,
             body.len()
@@ -148,8 +158,44 @@ impl Response {
     }
 }
 
+pub(crate) fn reason(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        201 => "Created",
+        202 => "Accepted",
+        400 => "Bad Request",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        409 => "Conflict",
+        412 => "Precondition Failed",
+        413 => "Content Too Large",
+        415 => "Unsupported Media Type",
+        417 => "Expectation Failed",
+        422 => "Unprocessable Content",
+        428 => "Precondition Required",
+        500 => "Internal Server Error",
+        503 => "Service Unavailable",
+        507 => "Insufficient Storage",
+        _ => "Error",
+    }
+}
+fn error_code(status: u16) -> &'static str {
+    match status {
+        400 => "invalid_request",
+        403 => "access_denied",
+        404 => "not_found",
+        405 => "method_not_allowed",
+        409 => "conflict",
+        413 => "body_too_large",
+        417 => "unsupported_expectation",
+        503 => "unavailable",
+        _ => "request_failed",
+    }
+}
+
 /// Reads the request head from `stream`: the bytes up to and with the empty
-/// line, at most `MAX_HEAD` bytes. The service ignores a request body.
+/// line, at most `MAX_HEAD` bytes. Preserve any body prefix read with the head.
 pub fn read_head(stream: &mut impl Read) -> io::Result<Vec<u8>> {
     let mut head = Vec::new();
     let mut buffer = [0; 1024];
@@ -184,19 +230,51 @@ pub fn parse(head: &[u8]) -> Option<Request> {
     if parts.next().is_some() || !version.starts_with("HTTP/1.") || !target.starts_with('/') {
         return None;
     }
-    let mut length = 0;
-    for line in lines {
-        if let Some((name, value)) = line.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("content-length") {
-                length = value.trim().parse().ok()?;
-            }
+    if !matches!(version, "HTTP/1.0" | "HTTP/1.1")
+        || target.contains('#')
+        || target.bytes().any(|c| c <= 32 || c == 127)
+        || !method.bytes().all(|c| c.is_ascii_uppercase())
+    {
+        return None;
+    }
+    let mut headers = std::collections::BTreeMap::new();
+    for line in lines.take_while(|line| !line.is_empty()) {
+        let (name, value) = line.split_once(':')?;
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&c))
+            || value.bytes().any(|c| (c < 32 && c != b'\t') || c == 127)
+        {
+            return None;
+        }
+        // Reject ambiguous framing and duplicated admission headers.
+        if headers
+            .insert(name.to_ascii_lowercase(), value.trim().to_owned())
+            .is_some()
+        {
+            return None;
         }
     }
-    let path = target.split(['?', '#']).next().unwrap_or(target);
+    if headers.contains_key("transfer-encoding") {
+        return None;
+    }
+    let length = match headers.get("content-length") {
+        Some(value) if !value.is_empty() && value.bytes().all(|c| c.is_ascii_digit()) => {
+            value.parse().ok()?
+        }
+        Some(_) => return None,
+        None => 0,
+    };
+    let (path, query) = target
+        .split_once('?')
+        .map_or((target, None), |(p, q)| (p, Some(q.to_owned())));
     Some(Request {
         method: method.to_owned(),
         path: path.to_owned(),
         length,
+        query,
+        headers,
     })
 }
 
@@ -218,8 +296,20 @@ pub fn respond(request: &Request, body: &[u8], env: &Env<impl Files>) -> Respons
         Response::error(status, &format!("{error:#}"))
     };
     match (route, request.method.as_str()) {
+        ("ping", "GET") => ok(json!({ "protocol": PROTOCOL })),
         ("status", "GET") => ok(status(env)),
-        ("diag", "GET") => ok(diag(env.files, env.connection)),
+        ("diag" | "debug/diagnostics", "GET") => {
+            let mut body = diag(env.files, env.connection);
+            let trusted =
+                trust::installed_release(env.card.root(), &grkit_core::release::OFFICIAL_KEYS)
+                    .map(|release| release.official_looks.into_values().collect())
+                    .unwrap_or_default();
+            body["lookLibrary"] = match looks::inventory(env.card.root(), &trusted) {
+                Ok(inventory) => inventory,
+                Err(error) => json!({"available": false, "detail": format!("{error:#}")}),
+            };
+            ok(body)
+        }
         ("package", "GET") => match env.card.package() {
             Ok(mut body) => {
                 let camera = match (env.device)() {
@@ -264,9 +354,10 @@ pub fn respond(request: &Request, body: &[u8], env: &Env<impl Files>) -> Respons
             Ok(summary) => ok(summary),
             Err(error) => failed(error, 409),
         },
-        ("status" | "diag" | "package" | "update" | "rollback", _) => {
-            Response::error(405, "method not allowed")
-        }
+        (
+            "ping" | "status" | "diag" | "debug/diagnostics" | "package" | "update" | "rollback",
+            _,
+        ) => Response::error(405, "method not allowed"),
         _ => Response::error(404, "not found"),
     }
 }
@@ -432,6 +523,8 @@ mod tests {
                 method: "GET".into(),
                 path: "/v1/status".into(),
                 length: 0,
+                query: Some("x=1".into()),
+                headers: Default::default(),
             })
         );
         assert_eq!(
@@ -501,6 +594,26 @@ mod tests {
     }
 
     #[test]
+    fn ambiguous_or_unsupported_framing_is_rejected() {
+        for headers in [
+            "Content-Length: 1\r\nContent-Length: 2\r\n",
+            "Transfer-Encoding: chunked\r\n",
+            "Content-Length: +1\r\n",
+            "Host: one\r\nhost: two\r\n",
+            "Host : invalid\r\n",
+            " folded: invalid\r\n",
+            "Bad header\r\n",
+        ] {
+            assert!(
+                parse(format!("PUT /v1/update HTTP/1.1\r\n{headers}\r\n").as_bytes()).is_none(),
+                "{headers}"
+            );
+        }
+        assert!(parse(b"GET /v1/ping#fragment HTTP/1.1\r\n\r\n").is_none());
+        assert!(parse(b"GET /v1/ping HTTP/1.9\r\n\r\n").is_none());
+    }
+
+    #[test]
     fn other_requests_get_an_error() {
         let files = fake(&[]);
         assert_eq!(get("/", &files).status, 404);
@@ -551,7 +664,7 @@ mod tests {
             || anyhow::bail!("no camera"),
         );
         assert_eq!(put.status, 503);
-        assert_eq!(put.body["error"], "no camera");
+        assert_eq!(put.body["detail"], "no camera");
         let large = vec![0; update::MAX_PACKAGE + 1];
         let put = request_on(
             &card,
@@ -599,6 +712,7 @@ mod tests {
                     model: "RICOH GR III".into(),
                     firmware: "2.21".into(),
                     free_bytes: None,
+                    serial_number: None,
                 })
             },
         );
@@ -651,7 +765,7 @@ mod tests {
         ] {
             let response = request(&format!("{method} {path} HTTP/1.1\r\n\r\n"), b"zip", &files);
             assert_eq!(response.status, 503, "{method} {path}");
-            let error = response.body["error"].as_str().unwrap();
+            let error = response.body["detail"].as_str().unwrap();
             assert!(error.contains("The card is not ready"), "{error}");
             assert!(error.contains("Try again"), "{error}");
         }
@@ -668,6 +782,9 @@ mod tests {
         assert!(head.starts_with("HTTP/1.1 404 Not Found\r\n"));
         assert!(head.contains(&format!("Content-Length: {}", body.len())));
         assert!(head.contains("Connection: close"));
-        assert_eq!(body, r#"{"error":"not found"}"#);
+        assert_eq!(
+            serde_json::from_str::<Value>(body).unwrap()["detail"],
+            "not found"
+        );
     }
 }

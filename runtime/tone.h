@@ -1,5 +1,6 @@
 #ifndef GRKIT_TONE_H
 #define GRKIT_TONE_H
+#include "record_registry.h"
 /* The capability CORE.TONE (grkit_core::capabilities): the effect of still
    pictures and the live view. Its value is 0 for Off, or n + 1 for effect n.
    The installer writes one record for each effect after the header, and the
@@ -23,7 +24,12 @@
 _Static_assert(GRKIT_RECORD_SIZE==17U*256U && GRKIT_TEXT_RECORDS<4096U/17U,"record_index divides by 17 x 256");
 static __attribute__((unused)) u32 record_index(volatile u32 *h,u32 record) {
     u32 offset=record-h[GRKIT_HOST_RECORDS/4], n=h[GRKIT_HOST_COUNT/4], index;
-    if(n>GRKIT_TEXT_RECORDS || offset>=n*GRKIT_RECORD_SIZE) return GRKIT_TEXT_RECORDS;
+    if(n>GRKIT_TEXT_RECORDS) return GRKIT_TEXT_RECORDS;
+    if(offset>=n*GRKIT_RECORD_SIZE) {
+        if(!h[GRKIT_HOST_RECORD_BANK2/4]) return GRKIT_TEXT_RECORDS;
+        offset=record-h[GRKIT_HOST_RECORD_BANK2/4];
+        if(offset>=n*GRKIT_RECORD_SIZE) return GRKIT_TEXT_RECORDS;
+    }
     index=((offset>>8)*3856U)>>16;
     return index*GRKIT_RECORD_SIZE==offset ? index : GRKIT_TEXT_RECORDS;
 }
@@ -40,7 +46,7 @@ static __attribute__((unused)) u32 tone_values(volatile u32 *h) {
 }
 /* The record of a value, or 0 for Off. */
 static __attribute__((unused)) u32 tone_record(volatile u32 *h,u32 value) {
-    return value ? h[GRKIT_HOST_RECORDS/4]+(value-1)*GRKIT_RECORD_SIZE : 0;
+    return value ? record_address(h,value-1) : 0;
 }
 /* The native value 0..8 (4 is neutral) of Fn adjustment `index` of a record:
    (stored + default + 4) mod 9. A stored byte (GRKIT_RECORD_PARAMETERS) is

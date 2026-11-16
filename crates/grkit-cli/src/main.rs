@@ -146,6 +146,9 @@ enum Command {
         /// Each official module file (.GRM) of the release.
         #[arg(long = "module", required = true)]
         modules: Vec<PathBuf>,
+        /// Compiled official GRFs whose identity the release signs.
+        #[arg(long)]
+        effects: Option<PathBuf>,
         #[arg(long, value_parser = grkit_core::camera::CAMERAS.map(|camera| camera.id))]
         camera: String,
         #[arg(long)]
@@ -723,6 +726,7 @@ fn run(command: Command) -> Result<Value> {
         Command::Sign {
             build,
             modules,
+            effects,
             camera,
             out,
         } => {
@@ -739,7 +743,10 @@ fn run(command: Command) -> Result<Value> {
                 .map(|path| storage::read_bounded(path, packaging::MAX_FILE_SIZE))
                 .collect::<Result<Vec<_>>>()?;
             let camera = grkit_core::camera::find(&camera)?;
-            let statement = release::Statement::of_release(&runtimes, &modules, camera)?;
+            let mut statement = release::Statement::of_release(&runtimes, &modules, camera)?;
+            if let Some(directory) = effects {
+                statement.official_looks = storage::read_effects(&directory)?.content_hashes()?;
+            }
             let bytes = statement.to_bytes()?;
             let signature = key.sign(&bytes);
             storage::write_directory(
