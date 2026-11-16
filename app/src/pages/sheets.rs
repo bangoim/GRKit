@@ -8,7 +8,7 @@ use crate::store::{AppState, Sheet, link_error_body, link_error_title};
 use crate::strings::{format_bytes, tr};
 use crate::ui::{
     STEP1, STEP2, STEP3, StepState, camera_art, checklist_row, connection_button, connection_icon,
-    secondary_button, sheet_primary_button, sheet_shell, sheet_surface, token,
+    secondary_button, sheet_primary_button, sheet_shell, sheet_surface, token, touch_target,
 };
 
 pub fn overlay(app: AppState) -> impl IntoElement {
@@ -27,18 +27,35 @@ pub fn overlay(app: AppState) -> impl IntoElement {
         .close_on_escape(dismissible)
         .backdrop_style(|s| s.bg(rgba(0x00000047)))
         .popup_style(|s| {
-            s.mx(px(8.0))
-                .mb(px(8.0))
-                .rounded(px(30.0))
-                .bg(sheet_surface)
-                .shadow([BoxShadow {
-                    offset_x: Points(0.0),
-                    offset_y: Points(20.0),
-                    blur: Points(60.0),
-                    spread: Points(0.0),
-                    color: rgba(0x00000040).into(),
-                    inset: false,
-                }])
+            s.mx(px(if cfg!(target_os = "android") {
+                0.0
+            } else {
+                8.0
+            }))
+            .mb(px(if cfg!(target_os = "android") {
+                0.0
+            } else {
+                8.0
+            }))
+            .rounded_t(px(if cfg!(target_os = "android") {
+                28.0
+            } else {
+                30.0
+            }))
+            .rounded_b(px(if cfg!(target_os = "android") {
+                0.0
+            } else {
+                30.0
+            }))
+            .bg(sheet_surface)
+            .shadow([BoxShadow {
+                offset_x: Points(0.0),
+                offset_y: Points(20.0),
+                blur: Points(60.0),
+                spread: Points(0.0),
+                color: rgba(0x00000040).into(),
+                inset: false,
+            }])
         })
         .on_open_change({
             let app = app.clone();
@@ -99,7 +116,11 @@ fn connection_shell(
         .child(
             view()
                 .gap(px(6.0))
-                .pr(if show_close { px(44.0) } else { px(0.0) })
+                .pr(if show_close {
+                    px(touch_target())
+                } else {
+                    px(0.0)
+                })
                 .child(
                     text(title.into())
                         .text_size(px(22.0))
@@ -115,7 +136,7 @@ fn connection_shell(
         .child(show_close.then(|| {
             view().absolute().right(px(18.0)).top(px(22.0)).child(
                 view()
-                    .size(px(44.0))
+                    .size(px(touch_target()))
                     .items_center()
                     .justify_center()
                     .role(AccessibilityRole::Button)
@@ -622,7 +643,7 @@ fn installation_steps() -> impl IntoElement {
 fn page_dot(i: u32, index: Signal<u32>, track: ElementRef) -> impl IntoElement {
     let caption_key = ["confirm.step1", "confirm.step2", "confirm.step3"][i as usize];
     view()
-        .size(px(44.0))
+        .size(px(touch_target()))
         .items_center()
         .justify_center()
         .role(AccessibilityRole::Button)

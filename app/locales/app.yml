@@ -370,3 +370,13 @@ loading.camera:
 loading.update:
   en: Checking for updates…
   zh-CN: 正在检查更新…
+
+android.connecting.wifi_sub:
+  en: Choose the camera in the Android network prompt. Stay connected even without internet.
+  zh-CN: 请在 Android 网络提示中选择相机。即使没有互联网，也请保持连接。
+android.error.bt_body:
+  en: Turn on Bluetooth. In Android Settings, allow Nearby devices for GRKit on Android 12 or later. On Android 11 or earlier, allow Location and turn on Location services.
+  zh-CN: 请打开蓝牙。在 Android 设置中，Android 12 及更新版本需允许 GRKit 使用“附近的设备”；Android 11 及更早版本需允许位置权限，并打开定位服务。
+android.error.wifi_body:
+  en: Select the camera in the network prompt. On Android 13 or later, allow Nearby devices for GRKit. On Android 12 or earlier, allow Location and turn on Location services.
+  zh-CN: 请在网络提示中选择相机。Android 13 及更新版本需允许 GRKit 使用“附近的设备”；Android 12 及更早版本需允许位置权限，并打开定位服务。

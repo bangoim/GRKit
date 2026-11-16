@@ -2,7 +2,6 @@
 
 use std::time::{Duration, Instant};
 
-use nsh_core::platform::HttpRequest;
 use nsh_core::prelude::*;
 
 use crate::domain::{
@@ -11,16 +10,13 @@ use crate::domain::{
     status_poll_timeout_error,
 };
 
-use super::{camera_http_base, with_timeout};
+use super::camera_http_base;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
 async fn camera_get(url: String) -> Result<nsh_core::element::HttpResponse, LinkError> {
-    let mut request = HttpRequest::get(url).header("Cache-Control", "no-cache, no-store");
-    request.follow_redirects = false;
-    with_timeout(fetch(request), REQUEST_TIMEOUT)
+    super::camera_request("GET", url, Vec::new(), REQUEST_TIMEOUT)
         .await
-        .ok_or(LinkError::ConnectionLost)?
         .map_err(|_| LinkError::ConnectionLost)
 }
 

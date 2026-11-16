@@ -1,12 +1,9 @@
 //! Camera mutations are serialized by the store. Never automatically replay a PUT.
-use super::{camera_http_base, with_timeout};
+use super::camera_http_base;
 use crate::domain::{
     PackageResponse, UpdateError, UpdateIntent, UpdateKind, UpdateSnapshot, response_error,
 };
-use nsh_core::{
-    platform::HttpRequest,
-    prelude::{data_dir, fetch},
-};
+use nsh_core::prelude::data_dir;
 use std::{fs, time::Duration};
 
 async fn request(
@@ -15,15 +12,14 @@ async fn request(
     body: Vec<u8>,
     budget: Duration,
 ) -> Result<serde_json::Value, UpdateError> {
-    let mut request = HttpRequest::new(method, format!("{}{path}", camera_http_base()))
-        .header("Cache-Control", "no-cache, no-store")
-        .header("Content-Type", "application/zip")
-        .body(body);
-    request.follow_redirects = false;
-    let response = with_timeout(fetch(request), budget)
-        .await
-        .ok_or(UpdateError::ConnectionLost)?
-        .map_err(|_| UpdateError::ConnectionLost)?;
+    let response = super::camera_request(
+        method,
+        format!("{}{path}", camera_http_base()),
+        body,
+        budget,
+    )
+    .await
+    .map_err(|_| UpdateError::ConnectionLost)?;
     if !response.ok() {
         return Err(response_error(response.status(), &response.text()));
     }

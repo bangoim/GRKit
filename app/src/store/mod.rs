@@ -846,7 +846,9 @@ impl Default for AppState {
 }
 
 fn demo_requested() -> bool {
-    if env::var("GRKIT_DEMO").as_deref() == Ok("1") {
+    if env::var("GRKIT_DEMO").as_deref() == Ok("1")
+        || crate::platform::config_value("GRKIT_DEMO_SCREEN").is_some()
+    {
         return true;
     }
     for arg in env::args() {

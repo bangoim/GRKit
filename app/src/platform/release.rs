@@ -25,6 +25,65 @@ const INDEX_LIMIT: usize = 2 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(45);
 const CACHE_LIMIT: u64 = 128 * 1024 * 1024;
 
+/// Development keys come only from the debuggable Android host. Normal builds,
+/// including desktop and iOS, retain the compiled-in official trust roots.
+fn trusted_keys(base: &str) -> Result<Vec<[u8; 32]>, String> {
+    #[cfg(target_os = "android")]
+    let development_key = super::android::config("GRKIT_RELEASE_PUBLIC_KEY");
+    #[cfg(not(target_os = "android"))]
+    let development_key: Option<String> = None;
+    trusted_keys_for(base, development_key.as_deref())
+}
+
+fn trusted_keys_for(base: &str, development_key: Option<&str>) -> Result<Vec<[u8; 32]>, String> {
+    let mut keys = release::OFFICIAL_KEYS.to_vec();
+    let Some(encoded) = development_key else {
+        return Ok(keys);
+    };
+    if !loopback_release_base(base) {
+        return Err("Development release keys require a localhost or 127.0.0.1 release URL".into());
+    }
+    let bytes = encoded.as_bytes();
+    if bytes.len() != 64 {
+        return Err(
+            "Development release public key must contain exactly 64 hexadecimal characters".into(),
+        );
+    }
+    fn nibble(byte: u8) -> Result<u8, String> {
+        match byte {
+            b'0'..=b'9' => Ok(byte - b'0'),
+            b'a'..=b'f' => Ok(byte - b'a' + 10),
+            b'A'..=b'F' => Ok(byte - b'A' + 10),
+            _ => Err("Development release public key contains a non-hexadecimal character".into()),
+        }
+    }
+    let mut key = [0; 32];
+    for (target, pair) in key.iter_mut().zip(bytes.as_chunks::<2>().0) {
+        *target = (nibble(pair[0])? << 4) | nibble(pair[1])?;
+    }
+    keys.push(key);
+    Ok(keys)
+}
+
+fn loopback_release_base(base: &str) -> bool {
+    let Some((scheme, rest)) = base.split_once("://") else {
+        return false;
+    };
+    if !matches!(scheme, "http" | "https") || rest.contains(['?', '#', '\\']) {
+        return false;
+    }
+    let authority = rest.split('/').next().unwrap_or_default();
+    let (host, port) = authority
+        .split_once(':')
+        .map_or((authority, None), |(host, port)| (host, Some(port)));
+    matches!(host, "localhost" | "127.0.0.1")
+        && port.is_none_or(|port| {
+            !port.is_empty()
+                && port.bytes().all(|b| b.is_ascii_digit())
+                && port.parse::<u16>().is_ok_and(|port| port != 0)
+        })
+}
+
 fn cache_dir() -> Option<PathBuf> {
     data_dir().map(|dir| dir.join("release-cache-v1"))
 }
@@ -185,10 +244,11 @@ pub async fn latest(model: CameraModel, firmware: &str) -> Result<Release, Strin
     {
         return Err(format!("Unsupported {} firmware: {firmware}", camera.name));
     }
-    let base = std::env::var("GRKIT_RELEASE_BASE")
-        .unwrap_or_else(|_| "https://grkit.app".into())
+    let base = super::config_value("GRKIT_RELEASE_BASE")
+        .unwrap_or_else(|| "https://grkit.app".into())
         .trim_end_matches('/')
         .to_owned();
+    let keys = trusted_keys(&base)?;
     let cache = cache_dir();
     let index_name = format!(
         "index-{}-{}.json",
@@ -232,8 +292,8 @@ pub async fn latest(model: CameraModel, firmware: &str) -> Result<Release, Strin
     }
     let statement_bytes = indexed_file(&base, &index, &entry.statement).await?;
     let signature = indexed_file(&base, &index, &entry.signature).await?;
-    let statement = release::verify(&statement_bytes, &signature, &release::OFFICIAL_KEYS)
-        .map_err(|error| error.to_string())?;
+    let statement =
+        release::verify(&statement_bytes, &signature, &keys).map_err(|error| error.to_string())?;
     if statement.camera != camera || statement.version != index.version {
         return Err("Signed release does not match the camera or index version".into());
     }
@@ -448,7 +508,7 @@ pub async fn download(
         },
     )
     .map_err(|error| error.to_string())?;
-    release::verify_update(&package.bytes, &release::OFFICIAL_KEYS)
+    release::verify_update(&package.bytes, &trusted_keys(&release.base)?)
         .map_err(|error| error.to_string())?;
     Ok(package.bytes)
 }
@@ -456,6 +516,61 @@ pub async fn download(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_trust_contains_only_official_keys() {
+        for base in ["https://grkit.app", "http://127.0.0.1:18081"] {
+            assert_eq!(
+                trusted_keys_for(base, None).unwrap(),
+                release::OFFICIAL_KEYS
+            );
+        }
+    }
+
+    #[test]
+    fn development_key_is_decoded_only_for_loopback_releases() {
+        let key = "aB".repeat(32);
+        for base in [
+            "http://127.0.0.1:18081",
+            "http://localhost",
+            "https://localhost:443/fixture",
+        ] {
+            let keys = trusted_keys_for(base, Some(&key)).unwrap();
+            assert_eq!(
+                &keys[..release::OFFICIAL_KEYS.len()],
+                release::OFFICIAL_KEYS
+            );
+            assert_eq!(keys.last(), Some(&[0xab; 32]));
+        }
+        for base in [
+            "https://grkit.app",
+            "http://10.0.2.2",
+            "http://127.0.0.1.example",
+            "http://localhost@evil.test",
+            "http://localhost:80@evil.test",
+            "http://localhost:0",
+            "http://localhost:65536",
+            "http://localhost:abc",
+            "http://localhost?evil",
+            "ftp://localhost",
+            "http://localhost\\evil.test",
+        ] {
+            assert!(trusted_keys_for(base, Some(&key)).is_err(), "{base}");
+        }
+    }
+
+    #[test]
+    fn development_key_rejects_malformed_hex() {
+        for key in [
+            String::new(),
+            "a".repeat(63),
+            "a".repeat(65),
+            "g".repeat(64),
+            "é".repeat(32),
+        ] {
+            assert!(trusted_keys_for("http://127.0.0.1", Some(&key)).is_err());
+        }
+    }
 
     #[test]
     fn paths_cannot_escape_the_release_origin() {

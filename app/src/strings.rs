@@ -11,6 +11,16 @@ fn is_zh() -> bool {
 
 /// Look up a key; fills `%{name}` style placeholders from `args`.
 pub fn tr(key: &str, args: &[(&str, &str)]) -> String {
+    let key = if cfg!(target_os = "android") {
+        match key {
+            "connecting.wifi_sub" => "android.connecting.wifi_sub",
+            "error.bt_body" => "android.error.bt_body",
+            "error.wifi_body" => "android.error.wifi_body",
+            _ => key,
+        }
+    } else {
+        key
+    };
     let mut text = raw(key).to_owned();
     for (name, value) in args {
         text = text.replace(&format!("%{{{name}}}"), value);
@@ -28,6 +38,16 @@ fn raw(key: &str) -> &'static str {
 
 fn en(key: &str) -> &'static str {
     match key {
+        "android.connecting.wifi_sub" => {
+            "Choose the camera in the Android network prompt. Stay connected even without internet."
+        }
+        "android.error.bt_body" => {
+            "Turn on Bluetooth. In Android Settings, allow Nearby devices for GRKit on Android 12 or later. On Android 11 or earlier, allow Location and turn on Location services."
+        }
+        "android.error.wifi_body" => {
+            "Select the camera in the network prompt. On Android 13 or later, allow Nearby devices for GRKit. On Android 12 or earlier, allow Location and turn on Location services."
+        }
+
         "error.cancel_pending" => "Cancel Pending Update",
         "software.checking" => "Checking for updates…",
         "software.check" => "Check for Updates",
@@ -163,6 +183,15 @@ fn en(key: &str) -> &'static str {
 
 fn zh(key: &str) -> Option<&'static str> {
     Some(match key {
+        "android.connecting.wifi_sub" => {
+            "请在 Android 网络提示中选择相机。即使没有互联网，也请保持连接。"
+        }
+        "android.error.bt_body" => {
+            "请打开蓝牙。在 Android 设置中，Android 12 及更新版本需允许 GRKit 使用“附近的设备”；Android 11 及更早版本需允许位置权限，并打开定位服务。"
+        }
+        "android.error.wifi_body" => {
+            "请在网络提示中选择相机。Android 13 及更新版本需允许 GRKit 使用“附近的设备”；Android 12 及更早版本需允许位置权限，并打开定位服务。"
+        }
         "error.cancel_pending" => "取消待处理的更新",
         "software.checking" => "正在检查更新…",
         "software.check" => "检查更新",

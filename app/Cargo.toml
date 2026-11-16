@@ -22,6 +22,10 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 nsh-platform-macos = { version = "0.5.1", default-features = false }
 
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+base64 = "0.22"
+
 [target.'cfg(target_os = "ios")'.dependencies]
 nsh-platform-ios = { version = "0.5.1", default-features = false }
 objc2 = "0.6.5"

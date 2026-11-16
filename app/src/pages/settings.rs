@@ -5,49 +5,54 @@ use nsh_core::prelude::*;
 
 use crate::store::{APP_BUILD, APP_VERSION, GR_SNAP_URL, PRIVACY_URL, rate_url};
 use crate::strings::tr;
-use crate::ui::{gr_snap_icon, grouped_card, section_title, token};
+use crate::ui::{gr_snap_icon, grouped_card, section_title, token, touch_target};
 
 pub fn settings_root() -> impl IntoElement {
     nav_page()
         .title(move || tr("settings.title", &[]))
-        .header_large_title(true)
+        .header_large_title(!cfg!(target_os = "android"))
         .child(
-            scroll().flex_1().bg(move || token("grouped")).child(
-                view()
-                    .gap_8()
-                    .pt_4()
-                    .px_6()
-                    .pb_12()
-                    .child(
-                        view()
-                            .gap_2()
-                            .child(section_title(tr("settings.about", &[])))
-                            .child(grouped_card(
-                                view()
-                                    .child(value_row(
-                                        tr("settings.version", &[]),
-                                        format!("{APP_VERSION} ({APP_BUILD})"),
-                                        false,
-                                    ))
-                                    .child(link_row(tr("settings.rate", &[]), false, || {
-                                        spawn(async move {
-                                            let _ = open_url(rate_url()).await;
-                                        });
-                                    }))
-                                    .child(link_row(tr("settings.privacy", &[]), true, || {
-                                        spawn(async move {
-                                            let _ = open_url(PRIVACY_URL).await;
-                                        });
-                                    })),
-                            )),
-                    )
-                    .child(
-                        view()
-                            .gap_2()
-                            .child(section_title(tr("settings.more_maker", &[])))
-                            .child(grouped_card(gr_snap_row())),
-                    ),
-            ),
+            crate::ui::page_scroll()
+                .flex_1()
+                .bg(move || token("grouped"))
+                .child(
+                    view()
+                        .gap_8()
+                        .pt_4()
+                        .px_6()
+                        .pb_12()
+                        .child(
+                            view()
+                                .gap_2()
+                                .child(section_title(tr("settings.about", &[])))
+                                .child(grouped_card(
+                                    view()
+                                        .child(value_row(
+                                            tr("settings.version", &[]),
+                                            format!("{APP_VERSION} ({APP_BUILD})"),
+                                            false,
+                                        ))
+                                        .child((!cfg!(target_os = "android")).then(|| {
+                                            link_row(tr("settings.rate", &[]), false, || {
+                                                spawn(async move {
+                                                    let _ = open_url(rate_url()).await;
+                                                });
+                                            })
+                                        }))
+                                        .child(link_row(tr("settings.privacy", &[]), true, || {
+                                            spawn(async move {
+                                                let _ = open_url(PRIVACY_URL).await;
+                                            });
+                                        })),
+                                )),
+                        )
+                        .child((!cfg!(target_os = "android")).then(|| {
+                            view()
+                                .gap_2()
+                                .child(section_title(tr("settings.more_maker", &[])))
+                                .child(grouped_card(gr_snap_row()))
+                        })),
+                ),
         )
 }
 
@@ -117,7 +122,7 @@ fn gr_snap_row() -> impl IntoElement {
         )
         .child(
             view()
-                .min_h(px(44.0))
+                .min_h(px(touch_target()))
                 .px_3()
                 .rounded(px(8.0))
                 .items_center()

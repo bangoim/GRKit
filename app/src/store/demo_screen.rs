@@ -89,7 +89,7 @@ pub fn parse_demo_screen(id: &str) -> Option<DemoScreen> {
 
 /// Screen from `GRKIT_DEMO_SCREEN` or `--demo-screen <id>`.
 pub fn demo_screen_from_env() -> Option<DemoScreen> {
-    if let Ok(id) = env::var("GRKIT_DEMO_SCREEN")
+    if let Some(id) = crate::platform::config_value("GRKIT_DEMO_SCREEN")
         && let Some(screen) = parse_demo_screen(&id)
     {
         return Some(screen);

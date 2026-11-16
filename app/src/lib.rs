@@ -6,7 +6,7 @@
 //! - `ui`: shared phone chrome
 //! - `store`: app state and demo mode
 //! - `domain`: camera model, update flow, fake camera link
-//! - `platform`: Bluetooth / Wi-Fi bridges (iOS) or stubs
+//! - `platform`: Bluetooth / Wi-Fi bridges (iOS / Android) or desktop stubs
 //! - `strings`: English and Simplified Chinese copy
 
 #![allow(clippy::clone_on_copy)]

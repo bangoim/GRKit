@@ -1,8 +1,10 @@
-//! Native Bluetooth / Wi-Fi bridges. Non-iOS builds use a stub.
+//! Native Bluetooth / Wi-Fi bridges for iOS and Android.
 
+#[cfg(target_os = "android")]
+mod android;
 #[cfg(target_os = "ios")]
 mod ios;
-#[cfg(not(target_os = "ios"))]
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod stub;
 
 pub(crate) mod http;
@@ -16,8 +18,7 @@ use crate::domain::{
 
 /// Base URL for camera HTTP. `GRKIT_CAMERA_URL` overrides the on-camera default when set.
 pub fn camera_http_base() -> String {
-    std::env::var("GRKIT_CAMERA_URL")
-        .ok()
+    config_value("GRKIT_CAMERA_URL")
         .map(|s| s.trim().trim_end_matches('/').to_owned())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| CAMERA_HTTP_BASE.to_owned())
@@ -25,20 +26,19 @@ pub fn camera_http_base() -> String {
 
 /// True when `GRKIT_CAMERA_URL` is set (HTTP-only connect for simulator / local server).
 pub fn has_dev_camera_url() -> bool {
-    std::env::var("GRKIT_CAMERA_URL")
-        .ok()
+    config_value("GRKIT_CAMERA_URL")
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false)
 }
 
-/// True when this build can drive a Bluetooth central in principle (iOS).
+/// True when this build can drive a Bluetooth central in principle (iOS / Android).
 #[allow(dead_code)]
 pub fn bluetooth_available() -> bool {
-    #[cfg(target_os = "ios")]
+    #[cfg(any(target_os = "ios", target_os = "android"))]
     {
         true
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         false
     }
@@ -50,7 +50,11 @@ pub fn bluetooth_unavailable() -> bool {
     {
         ios::ble::bluetooth_unavailable()
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "android")]
+    {
+        android::bluetooth_unavailable()
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         true
     }
@@ -62,7 +66,11 @@ pub fn load_remembered() -> Option<RememberedCamera> {
     {
         ios::remember::load()
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "android")]
+    {
+        android::load_remembered()
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         stub::load_remembered()
     }
@@ -75,7 +83,11 @@ pub fn save_remembered(camera: &RememberedCamera) -> Result<(), String> {
     {
         ios::remember::save(camera)
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "android")]
+    {
+        android::save_remembered(camera)
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         stub::save_remembered(camera)
     }
@@ -88,7 +100,11 @@ pub fn start_scanning(tx: async_channel::Sender<Vec<NearbyCamera>>, remembered_i
     {
         ios::ble::start_scanning(tx, remembered_id);
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "android")]
+    {
+        android::start_scanning(tx, remembered_id);
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         stub::start_scanning(tx, remembered_id);
     }
@@ -100,7 +116,11 @@ pub fn watch_disconnects(tx: async_channel::Sender<String>) {
     {
         ios::ble::watch_disconnects(tx);
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "android")]
+    {
+        android::watch_disconnects(tx);
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         stub::watch_disconnects(tx);
     }
@@ -113,7 +133,11 @@ pub fn stop_scanning() {
     {
         ios::ble::stop_scanning();
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "android")]
+    {
+        android::stop_scanning();
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         stub::stop_scanning();
     }
@@ -132,7 +156,11 @@ pub async fn connect_camera(
     {
         ios::link::connect(peripheral_id, model_hint, &mut on_step).await
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "android")]
+    {
+        android::connect_camera(peripheral_id, model_hint, &mut on_step).await
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         let _ = (peripheral_id, model_hint, &mut on_step);
         stub::connect_camera().await
@@ -168,5 +196,37 @@ pub(crate) async fn with_timeout<T>(
     {
         Either::Left((value, _)) => Some(value),
         Either::Right(_) => None,
+    }
+}
+
+/// Android debug host injects build settings without mutating process environment.
+pub(crate) fn config_value(name: &str) -> Option<String> {
+    #[cfg(target_os = "android")]
+    if let Some(value) = android::config(name) {
+        return Some(value);
+    }
+    std::env::var(name).ok()
+}
+
+pub(crate) async fn camera_request(
+    method: &str,
+    url: String,
+    body: Vec<u8>,
+    budget: std::time::Duration,
+) -> Result<nsh_core::element::HttpResponse, String> {
+    #[cfg(target_os = "android")]
+    {
+        android::camera_request(method, url, body, budget).await
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let mut request = nsh_core::platform::HttpRequest::new(method, url)
+            .header("Cache-Control", "no-cache, no-store")
+            .header("Content-Type", "application/zip")
+            .body(body);
+        request.follow_redirects = false;
+        with_timeout(nsh_core::prelude::fetch(request), budget)
+            .await
+            .ok_or_else(|| "ConnectionLost".to_owned())?
     }
 }

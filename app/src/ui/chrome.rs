@@ -14,6 +14,23 @@ pub const STEP1: ImageAsset = asset!("step1.jpg");
 pub const STEP2: ImageAsset = asset!("step2.jpg");
 pub const STEP3: ImageAsset = asset!("step3.jpg");
 
+/// Minimum touch target for the current platform.
+pub fn touch_target() -> f32 {
+    if cfg!(target_os = "android") {
+        48.0
+    } else {
+        44.0
+    }
+}
+
+fn action_radius() -> f32 {
+    if cfg!(target_os = "android") {
+        25.0
+    } else {
+        8.0
+    }
+}
+
 pub fn gr_snap_icon() -> ImageAsset {
     GR_SNAP
 }
@@ -56,7 +73,7 @@ pub fn primary_button(title: impl Into<String>, on_press: impl Fn() + 'static) -
         .min_h(px(50.0))
         .py_3()
         .px_8()
-        .rounded(px(8.0))
+        .rounded(px(action_radius()))
         .items_center()
         .justify_center()
         .bg(move || token("button"))
@@ -66,7 +83,11 @@ pub fn primary_button(title: impl Into<String>, on_press: impl Fn() + 'static) -
         .active(|s| s.opacity(0.72))
         .child(
             text(title)
-                .text_size(px(17.0))
+                .text_size(px(if cfg!(target_os = "android") {
+                    16.0
+                } else {
+                    17.0
+                }))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(move || token("button-foreground")),
         )
@@ -82,7 +103,7 @@ pub fn sheet_primary_button(
         .w_full()
         .min_h(px(50.0))
         .py_3()
-        .rounded(px(8.0))
+        .rounded(px(action_radius()))
         .items_center()
         .justify_center()
         .bg(move || token("button"))
@@ -92,7 +113,11 @@ pub fn sheet_primary_button(
         .active(|s| s.opacity(0.72))
         .child(
             text(title)
-                .text_size(px(17.0))
+                .text_size(px(if cfg!(target_os = "android") {
+                    16.0
+                } else {
+                    17.0
+                }))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(move || token("button-foreground")),
         )
@@ -105,7 +130,7 @@ pub fn secondary_button(
     let title = title.into();
     view()
         .w_full()
-        .h(px(44.0))
+        .min_h(px(touch_target()))
         .items_center()
         .justify_center()
         .role(AccessibilityRole::Button)
@@ -122,7 +147,7 @@ pub fn secondary_button(
 
 pub fn close_chip(on_press: impl Fn() + 'static) -> impl IntoElement {
     view()
-        .size(px(44.0))
+        .size(px(touch_target()))
         .rounded_full()
         .items_center()
         .justify_center()
@@ -382,7 +407,7 @@ pub fn connection_button(title: String, on_press: impl Fn() + 'static) -> impl I
         .w_full()
         .min_h(px(50.0))
         .py_3()
-        .rounded(px(8.0))
+        .rounded(px(action_radius()))
         .items_center()
         .justify_center()
         .bg(move || token("connection-accent"))
@@ -392,7 +417,11 @@ pub fn connection_button(title: String, on_press: impl Fn() + 'static) -> impl I
         .active(|s| s.opacity(0.72))
         .child(
             text(title)
-                .text_size(px(17.0))
+                .text_size(px(if cfg!(target_os = "android") {
+                    16.0
+                } else {
+                    17.0
+                }))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(move || token("connection-accent-foreground")),
         )

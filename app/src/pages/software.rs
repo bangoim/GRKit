@@ -44,7 +44,7 @@ fn software_content(app: AppState) -> impl IntoElement {
         .flex_1()
         .bg(move || token("grouped"))
         .child(
-            scroll().flex_1().child(
+            crate::ui::page_scroll().flex_1().child(
                 view()
                     .gap_5()
                     .px_6()
