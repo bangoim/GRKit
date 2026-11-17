@@ -432,3 +432,285 @@ pub fn connection_icon(path: &'static str) -> impl IntoElement {
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="{path}"/></svg>"#
     ))).size(px(20.0))
 }
+
+/// Large page title with the brand bar, and an optional trailing control.
+pub fn page_title(title: impl Into<String>, trailing: Option<AnyElement>) -> impl IntoElement {
+    let title = title.into();
+    view()
+        .flex_row()
+        .items_end()
+        .justify_between()
+        .child(
+            view()
+                .gap_2()
+                .child(view().w(px(28.0)).h(px(3.0)).bg(move || token("tint")))
+                .child(
+                    text(title)
+                        .text_size(px(28.0))
+                        .font_weight(FontWeight::BOLD),
+                ),
+        )
+        .child(trailing)
+}
+
+/// Round button with a stroked icon, for page actions such as Add.
+pub fn circle_button(
+    path: &'static str,
+    label: String,
+    enabled: bool,
+    on_press: impl Fn() + 'static,
+) -> impl IntoElement {
+    view()
+        .size(px(touch_target()))
+        .rounded_full()
+        .items_center()
+        .justify_center()
+        .border_1()
+        .border_color(move || theme().border)
+        .bg(move || theme().card)
+        .role(AccessibilityRole::Button)
+        .label(label)
+        .opacity(if enabled { 1.0 } else { 0.4 })
+        .when(enabled, |v| {
+            v.on_press(on_press).active(|s| s.opacity(0.72))
+        })
+        .child(connection_icon(path))
+}
+
+/// One segment: its title, whether it is selected, and its action.
+pub type Segment = (String, bool, Box<dyn Fn()>);
+
+/// Segmented control: equal segments, the selected one raised.
+pub fn segmented(items: Vec<Segment>) -> impl IntoElement {
+    let mut row = view()
+        .flex_row()
+        .h(px(36.0))
+        .p(px(2.0))
+        .rounded(px(9.0))
+        .bg(move || theme().muted);
+    for (title, selected, on_press) in items {
+        row = row.child(
+            view()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .rounded(px(7.0))
+                .role(AccessibilityRole::Tab)
+                .label(title.clone())
+                .accessibility_state(move || AccessibilityState {
+                    selected,
+                    ..AccessibilityState::default()
+                })
+                .when(selected, |v| {
+                    v.bg(move || theme().card).shadow([BoxShadow {
+                        offset_x: Points(0.0),
+                        offset_y: Points(1.0),
+                        blur: Points(3.0),
+                        spread: Points(0.0),
+                        color: rgba(0x00000024).into(),
+                        inset: false,
+                    }])
+                })
+                .on_press(on_press)
+                .child(
+                    text(title)
+                        .text_size(px(14.0))
+                        .font_weight(if selected {
+                            FontWeight::SEMIBOLD
+                        } else {
+                            FontWeight::MEDIUM
+                        })
+                        .text_color(move || theme().foreground),
+                ),
+        );
+    }
+    row
+}
+
+/// Filter chip: filled when selected.
+pub fn chip(title: String, selected: bool, on_press: impl Fn() + 'static) -> impl IntoElement {
+    view()
+        .h(px(32.0))
+        .px(px(14.0))
+        .rounded_full()
+        .items_center()
+        .justify_center()
+        .border_1()
+        .border_color(move || {
+            if selected {
+                theme().foreground
+            } else {
+                theme().border
+            }
+        })
+        .bg(move || {
+            if selected {
+                theme().foreground
+            } else {
+                theme().card
+            }
+        })
+        .role(AccessibilityRole::Button)
+        .label(title.clone())
+        .accessibility_state(move || AccessibilityState {
+            selected,
+            ..AccessibilityState::default()
+        })
+        .on_press(on_press)
+        .child(
+            text(title)
+                .text_size(px(15.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(move || {
+                    if selected {
+                        theme().background
+                    } else {
+                        theme().foreground
+                    }
+                }),
+        )
+}
+
+/// On/off switch in the brand tint.
+pub fn toggle(
+    on: bool,
+    label: String,
+    enabled: bool,
+    on_press: impl Fn() + 'static,
+) -> impl IntoElement {
+    view()
+        .w(px(51.0))
+        .h(px(31.0))
+        .p(px(2.0))
+        .rounded_full()
+        .flex_row()
+        .justify_start()
+        .when(on, |v| v.justify_end())
+        .bg(move || if on { token("tint") } else { theme().border })
+        .opacity(if enabled { 1.0 } else { 0.4 })
+        .role(AccessibilityRole::Switch)
+        .label(label)
+        .accessibility_state(move || AccessibilityState {
+            checked: Some(if on {
+                nsh_core::Checked::True
+            } else {
+                nsh_core::Checked::False
+            }),
+            disabled: !enabled,
+            ..AccessibilityState::default()
+        })
+        .when(enabled, |v| v.on_press(on_press))
+        .child(
+            view()
+                .size(px(27.0))
+                .rounded_full()
+                .bg(rgb(0xFFFFFF))
+                .shadow([BoxShadow {
+                    offset_x: Points(0.0),
+                    offset_y: Points(2.0),
+                    blur: Points(4.0),
+                    spread: Points(0.0),
+                    color: rgba(0x00000026).into(),
+                    inset: false,
+                }]),
+        )
+}
+
+/// Small label in the accent tint, such as In Use.
+pub fn badge(title: String) -> impl IntoElement {
+    view()
+        .h(px(24.0))
+        .px_2()
+        .rounded(px(6.0))
+        .items_center()
+        .justify_center()
+        .bg(move || theme().accent)
+        .child(
+            text(title)
+                .text_size(px(13.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(move || token("tint")),
+        )
+}
+
+/// RGBA pixels at a size, cropped to fill; a muted box until they exist.
+pub fn picture(
+    pixels: Option<(u32, u32, std::sync::Arc<[u8]>)>,
+    width: f32,
+    height: f32,
+    radius: f32,
+    faded: bool,
+) -> AnyElement {
+    match pixels {
+        Some((w, h, rgba)) => image(nsh_core::element::ImageSrc::rgba(w, h, rgba))
+            .w(px(width))
+            .h(px(height))
+            .rounded(px(radius))
+            .object_fit(ResizeMode::Cover)
+            .opacity(if faded { 0.45 } else { 1.0 })
+            .into_element(),
+        None => view()
+            .w(px(width))
+            .h(px(height))
+            .rounded(px(radius))
+            .bg(move || theme().muted)
+            .into_element(),
+    }
+}
+
+/// A row with a title and a trailing control or value.
+pub fn control_row(
+    title: impl Into<String>,
+    trailing: impl IntoElement,
+    last: bool,
+) -> impl IntoElement {
+    view()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .min_h(px(50.0))
+        .px_4()
+        .style_when(!last, |st| {
+            st.border_b_1().border_b_color(move || theme().border)
+        })
+        .child(text(title.into()).text_size(px(17.0)).flex_shrink(1.0))
+        .child(trailing)
+}
+
+/// A pressable row whose title is the action, in `color`.
+pub fn action_row(
+    title: impl Into<String>,
+    destructive: bool,
+    last: bool,
+    on_press: impl Fn() + 'static,
+) -> impl IntoElement {
+    let title = title.into();
+    view()
+        .flex_row()
+        .items_center()
+        .min_h(px(50.0))
+        .px_4()
+        .role(AccessibilityRole::Button)
+        .label(title.clone())
+        .on_press(on_press)
+        .active(|s| s.opacity(0.72))
+        .style_when(!last, |st| {
+            st.border_b_1().border_b_color(move || theme().border)
+        })
+        .child(text(title).text_size(px(17.0)).text_color(move || {
+            if destructive {
+                theme().destructive
+            } else {
+                token("link")
+            }
+        }))
+}
+
+/// Footnote under a group.
+pub fn footnote(copy: impl Into<String>) -> impl IntoElement {
+    text(copy.into())
+        .text_size(px(13.0))
+        .line_height(px(18.0))
+        .text_color(move || theme().muted_foreground)
+}

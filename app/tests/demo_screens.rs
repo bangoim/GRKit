@@ -7,7 +7,7 @@ use std::{
 };
 
 use grkit_app::App;
-use grkit_app::store::{DEMO_SCREEN_IDS, key_text};
+use grkit_app::store::{DEMO_SCREEN_IDS, key_text, shows_alert};
 use nsh_core::platform::Os;
 use nsh_engine::{EngineConfig, Root};
 use nsh_testing::Headless;
@@ -37,24 +37,22 @@ fn each_demo_screen_shows_its_key_text() {
     for &(id, screen) in DEMO_SCREEN_IDS {
         let key = key_text(screen);
         let mut app = start_screen(id);
-        if id == "C2" {
+        if shows_alert(screen) {
             // Alert is presented asynchronously; poll dialogs until the title appears.
             let mut found = false;
             for _ in 0..40 {
                 app.wait(Duration::from_millis(50)).unwrap();
                 let dialogs = app.screen().dialogs();
-                found = dialogs.iter().any(|d| {
-                    d.title
-                        .as_deref()
-                        .is_some_and(|t| t == key || t.contains("Roll Back to GRKit"))
-                });
+                found = dialogs
+                    .iter()
+                    .any(|d| d.title.as_deref().is_some_and(|t| t == key));
                 if found {
                     break;
                 }
             }
             assert!(
                 found,
-                "screen C2 missing alert title `{key}`; dialogs={:?}",
+                "screen {id} missing alert title `{key}`; dialogs={:?}",
                 app.screen().dialogs()
             );
             continue;

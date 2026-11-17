@@ -1,4 +1,4 @@
-//! Two tabs (Camera, Settings) with navigation stacks kept mounted.
+//! Three tabs (Camera, Looks, Settings) with navigation stacks kept mounted.
 
 use nsh_base::{nav_stack, theme};
 use nsh_core::{
@@ -7,12 +7,23 @@ use nsh_core::{
     prelude::*,
 };
 
-use crate::pages::{camera_root, settings_root, software_page};
+use crate::pages::{
+    camera_root, import_page, look_page, looks_root, order_page, rename_page, settings_root,
+    software_page,
+};
 use crate::store::{AppState, Route, Tab};
 use crate::strings::tr;
 
+/// An SF Symbol on iOS; the app's drawable on Android.
+const LOOKS_ICON: &str = if cfg!(target_os = "android") {
+    "camera_filters"
+} else {
+    "camera.filters"
+};
+
 const TABS: &[(Tab, &str, &str)] = &[
     (Tab::Camera, "tab.camera", "camera"),
+    (Tab::Looks, "tab.looks", LOOKS_ICON),
     (Tab::Settings, "tab.settings", "gearshape"),
 ];
 
@@ -65,6 +76,7 @@ fn tab_stack(app: AppState, tab: Tab) -> AnyElement {
 fn root(app: AppState, tab: Tab) -> AnyElement {
     match tab {
         Tab::Camera => camera_root(app).into_element(),
+        Tab::Looks => looks_root(app).into_element(),
         Tab::Settings => settings_root().into_element(),
     }
 }
@@ -76,6 +88,10 @@ fn pushed(app: AppState, tab: Tab, depth: usize, route: Route) -> AnyElement {
     };
     match route {
         Route::SoftwareUpdate => software_page(app, back).into_element(),
+        Route::LookDetail(id) => look_page(app, id, back).into_element(),
+        Route::LookRename(id) => rename_page(app, id, back).into_element(),
+        Route::LookOrder => order_page(app, back).into_element(),
+        Route::LookImport => import_page(app, back).into_element(),
     }
 }
 

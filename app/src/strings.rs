@@ -177,7 +177,7 @@ fn en(key: &str) -> &'static str {
         "settings.gr_snap_name" => "GR Snap",
         "settings.gr_snap_desc" => "Wireless transfer and remote for RICOH GR",
         "settings.view" => "View",
-        _ => "???",
+        _ => crate::strings_looks::en(key).unwrap_or("???"),
     }
 }
 
@@ -305,7 +305,7 @@ fn zh(key: &str) -> Option<&'static str> {
         "settings.gr_snap_name" => "GR Snap",
         "settings.gr_snap_desc" => "RICOH GR 的无线传输与遥控",
         "settings.view" => "查看",
-        _ => return None,
+        _ => return crate::strings_looks::zh(key),
     })
 }
 

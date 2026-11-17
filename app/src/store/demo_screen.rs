@@ -12,10 +12,11 @@ use std::{
 use nsh_base::alert_dialog;
 use nsh_core::prelude::*;
 
+use crate::domain::fake_looks::DEMO_CUSTOM_ID;
 use crate::domain::{
     CameraLink, FakeCamera, FakeConfig, UpdateError, UpdateKind, UpdatePhase, block_on_ready,
 };
-use crate::store::{AppState, Route, Sheet, Tab};
+use crate::store::{AppState, LooksView, Route, Sheet, Tab};
 use crate::strings::tr;
 
 /// Design-file screen ids used for demo screenshots.
@@ -55,6 +56,30 @@ pub enum DemoScreen {
     C4,
     /// C5 — not confirmed error.
     C5,
+    /// L1 — Looks on the camera, in menu order.
+    L1,
+    /// L2 — an official Look.
+    L2,
+    /// L3 — an imported Look.
+    L3,
+    /// L4 — camera menu order.
+    L4,
+    /// L5 — delete the Look in use (alert).
+    L5,
+    /// L6 — a Look that recipes use cannot be deleted (alert).
+    L6,
+    /// L7 — All Looks, one being added.
+    L7,
+    /// L8 — import a Look sheet.
+    L8,
+    /// L9 — a new Look ready to send.
+    L9,
+    /// L10 — Looks without a camera.
+    L10,
+    /// L11 — an update waits on the camera (read only).
+    L11,
+    /// L12 — no room on the camera (alert).
+    L12,
 }
 
 /// Every id string the env / CLI accept, in design order.
@@ -76,6 +101,18 @@ pub const DEMO_SCREEN_IDS: &[(&str, DemoScreen)] = &[
     ("C3", DemoScreen::C3),
     ("C4", DemoScreen::C4),
     ("C5", DemoScreen::C5),
+    ("L1", DemoScreen::L1),
+    ("L2", DemoScreen::L2),
+    ("L3", DemoScreen::L3),
+    ("L4", DemoScreen::L4),
+    ("L5", DemoScreen::L5),
+    ("L6", DemoScreen::L6),
+    ("L7", DemoScreen::L7),
+    ("L8", DemoScreen::L8),
+    ("L9", DemoScreen::L9),
+    ("L10", DemoScreen::L10),
+    ("L11", DemoScreen::L11),
+    ("L12", DemoScreen::L12),
 ];
 
 /// Parse a design id (`A5`, `a5`, …). Unknown → `None` (normal demo).
@@ -237,7 +274,93 @@ pub fn apply(app: AppState, screen: DemoScreen) {
             app.set_tab(Tab::Camera);
             app.set_sheet(Some(Sheet::Error(UpdateError::NotConfirmed)));
         }
+        DemoScreen::L1 => seed_looks(app),
+        DemoScreen::L2 => {
+            seed_looks(app);
+            app.push(Route::LookDetail(PORTRA.into()));
+        }
+        DemoScreen::L3 => {
+            seed_looks(app);
+            app.push(Route::LookDetail(DEMO_CUSTOM_ID.into()));
+        }
+        DemoScreen::L4 => {
+            seed_looks(app);
+            app.open_look_order();
+        }
+        DemoScreen::L5 => {
+            app.with_fake_looks(|f| f.set_dependencies(PORTRA, Vec::new()));
+            seed_looks(app);
+            app.push(Route::LookDetail(PORTRA.into()));
+            ask_delete(app);
+        }
+        DemoScreen::L6 => {
+            seed_looks(app);
+            app.push(Route::LookDetail(PORTRA.into()));
+            ask_delete(app);
+        }
+        DemoScreen::L7 => {
+            seed_looks(app);
+            app.set_looks_view(LooksView::All);
+            app.seed_adding("provia-100f-v1");
+        }
+        DemoScreen::L8 => {
+            seed_looks(app);
+            app.set_sheet(Some(Sheet::ImportLook));
+        }
+        DemoScreen::L9 => {
+            seed_looks(app);
+            app.seed_import_draft();
+            app.push(Route::LookImport);
+        }
+        DemoScreen::L10 => {
+            app.status.set(None);
+            app.package.set(None);
+            app.set_sheet(None);
+            app.set_tab(Tab::Looks);
+        }
+        DemoScreen::L11 => {
+            app.with_fake_looks(|f| f.update_pending = true);
+            seed_looks(app);
+        }
+        DemoScreen::L12 => {
+            seed_looks(app);
+            app.set_looks_view(LooksView::All);
+            spawn(async move {
+                next_frame().await;
+                next_frame().await;
+                app.alert_look_error(crate::domain::LookError::NoRoom);
+            });
+        }
     }
+}
+
+const PORTRA: &str = "portra-400-endura-v1";
+
+/// Connected, on the Looks tab, with the demo camera's Looks read.
+fn seed_looks(app: AppState) {
+    seed_connected_up_to_date(app);
+    app.set_sheet(None);
+    app.set_tab(Tab::Looks);
+    app.refresh_looks();
+}
+
+/// Ask to delete Portra 400 after the page shows.
+fn ask_delete(app: AppState) {
+    spawn(async move {
+        next_frame().await;
+        next_frame().await;
+        if let Some(look) = app.look(PORTRA) {
+            crate::pages::confirm_delete(app, look);
+        }
+    });
+}
+
+/// Screens whose key text is an alert title.
+pub fn shows_alert(screen: DemoScreen) -> bool {
+    matches!(
+        screen,
+        DemoScreen::C2 | DemoScreen::L5 | DemoScreen::L6 | DemoScreen::L12
+    )
 }
 
 fn seed_connected_available(app: AppState) {
@@ -330,5 +453,17 @@ pub fn key_text(screen: DemoScreen) -> &'static str {
         DemoScreen::C3 => "Confirm Roll Back on the Camera",
         DemoScreen::C4 => "Card Is Full",
         DemoScreen::C5 => "Not Confirmed",
+        DemoScreen::L1 => "In Camera Menu Order",
+        DemoScreen::L2 => "Make an Editable Copy",
+        DemoScreen::L3 => "Replace with Another File",
+        DemoScreen::L4 => "Drag a look to move it. The camera menu uses this order.",
+        DemoScreen::L5 => "Delete Portra 400?",
+        DemoScreen::L6 => "Can’t Delete Portra 400",
+        DemoScreen::L7 => "Slide",
+        DemoScreen::L8 => "Lightroom Preset",
+        DemoScreen::L9 => "Send to Camera",
+        DemoScreen::L10 => "No Camera Connected",
+        DemoScreen::L11 => "An update is waiting on the camera",
+        DemoScreen::L12 => "No Room on the Camera",
     }
 }

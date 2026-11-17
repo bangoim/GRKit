@@ -8,6 +8,7 @@ mod ios;
 mod stub;
 
 pub(crate) mod http;
+pub(crate) mod looks;
 pub(crate) mod release;
 pub(crate) mod update;
 

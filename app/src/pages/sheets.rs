@@ -14,7 +14,12 @@ use crate::ui::{
 pub fn overlay(app: AppState) -> impl IntoElement {
     let dismissible = {
         let app = app.clone();
-        move || matches!(app.sheet(), Some(Sheet::Nearby | Sheet::Scan))
+        move || {
+            matches!(
+                app.sheet(),
+                Some(Sheet::Nearby | Sheet::Scan | Sheet::ImportLook)
+            )
+        }
     };
     sheet()
         .open({
@@ -63,7 +68,7 @@ pub fn overlay(app: AppState) -> impl IntoElement {
                 if let SheetEvent::OpenChange(false, _) = e {
                     match app.sheet() {
                         Some(Sheet::Nearby) => app.dismiss_nearby(),
-                        Some(Sheet::Scan) => app.set_sheet(None),
+                        Some(Sheet::Scan | Sheet::ImportLook) => app.set_sheet(None),
                         _ => {}
                     }
                 }
@@ -74,6 +79,7 @@ pub fn overlay(app: AppState) -> impl IntoElement {
             move || match app.sheet() {
                 Some(Sheet::Nearby) => nearby(app.clone()).into_element(),
                 Some(Sheet::Scan) => scan(app.clone()).into_element(),
+                Some(Sheet::ImportLook) => crate::pages::import_sheet(app.clone()).into_element(),
                 Some(Sheet::Connecting { step }) => connecting(app.clone(), step).into_element(),
                 Some(Sheet::ConnectError(error)) => {
                     connect_error_sheet(app.clone(), error).into_element()

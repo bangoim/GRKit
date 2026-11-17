@@ -3,10 +3,13 @@
 //! Reactive fields use NSH `Signal`s so the UI updates when they change.
 
 mod demo_screen;
+mod looks;
 mod update;
 
+pub use looks::{CatalogItem, ImportDraft, LookPicture, LooksStore, LooksView};
+
 pub use demo_screen::{
-    DEMO_SCREEN_IDS, DemoScreen, demo_screen_from_env, key_text, parse_demo_screen,
+    DEMO_SCREEN_IDS, DemoScreen, demo_screen_from_env, key_text, parse_demo_screen, shows_alert,
 };
 
 use std::{
@@ -37,13 +40,22 @@ const MAX_DEPTH: usize = 4;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Camera,
+    Looks,
     Settings,
 }
 
-/// Pages pushed on the Camera tab.
+/// Pages pushed on a tab's navigation stack.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Route {
     SoftwareUpdate,
+    /// One Look on the camera, by ID.
+    LookDetail(String),
+    /// Rename an imported Look.
+    LookRename(String),
+    /// Camera menu order.
+    LookOrder,
+    /// A Look made from a file on the phone.
+    LookImport,
 }
 
 /// Modal sheets over the camera tab.
@@ -51,13 +63,20 @@ pub enum Route {
 pub enum Sheet {
     Nearby,
     Scan,
-    Connecting { step: u8 },
+    Connecting {
+        step: u8,
+    },
     ConnectError(LinkError),
     Sending,
     Confirm,
     Restart,
-    Installed { version: String, previous: String },
+    Installed {
+        version: String,
+        previous: String,
+    },
     Error(UpdateError),
+    /// Choose what kind of file becomes a new Look.
+    ImportLook,
 }
 
 /// Shared app state provided at the root (`Copy` handle on signals).
@@ -65,7 +84,8 @@ pub enum Sheet {
 pub struct AppState {
     demo: bool,
     tab: Signal<Tab>,
-    stacks: Signal<[Vec<Route>; 2]>,
+    stacks: Signal<[Vec<Route>; 3]>,
+    pub(crate) looks: LooksStore,
     sheet: Signal<Option<Sheet>>,
     pub(crate) status: Signal<Option<CameraStatus>>,
     pub(crate) package: Signal<Option<PackageInfo>>,
@@ -134,7 +154,8 @@ impl AppState {
             release_error: signal(None),
             release: stored(RefCell::new(None)),
             tab: signal(Tab::Camera),
-            stacks: signal([Vec::new(), Vec::new()]),
+            stacks: signal([Vec::new(), Vec::new(), Vec::new()]),
+            looks: LooksStore::new(demo),
             sheet: signal(None),
             status: signal(None),
             package: signal(None),
@@ -155,6 +176,15 @@ impl AppState {
             root: Owner::current(),
             nearby_prompt: stored(RefCell::new(NearbyPromptGate::new())),
         };
+        // Development: open a tab at launch, for simulator runs without taps.
+        match platform::config_value("GRKIT_START_TAB").as_deref() {
+            Some("looks") => app.tab.set(Tab::Looks),
+            Some("looks-all") => {
+                app.tab.set(Tab::Looks);
+                app.set_looks_view(LooksView::All);
+            }
+            _ => {}
+        }
         if let Some(screen) = screen {
             demo_screen::apply(app, screen);
         } else if !demo && !platform::has_dev_camera_url() {
@@ -197,6 +227,9 @@ impl AppState {
 
     pub fn set_tab(self, tab: Tab) {
         self.tab.set(tab);
+        if tab == Tab::Looks {
+            self.open_looks();
+        }
     }
 
     pub fn route_at(self, tab: Tab, depth: usize) -> Option<Route> {
@@ -534,6 +567,7 @@ impl AppState {
                 self.initial_connect.set(false);
                 match result {
                     Ok((status, package, remembered)) => {
+                        self.reset_looks();
                         self.status.set(Some(status));
                         self.package.set(Some(package));
                         self.remembered.set(Some(remembered));
@@ -541,6 +575,9 @@ impl AppState {
                         self.connect_started.set(None);
                         self.refresh_update_info();
                         self.resume_update();
+                        if self.tab() == Tab::Looks {
+                            self.refresh_looks();
+                        }
                     }
                     Err(LinkError::Cancelled) => {
                         self.dismiss_nearby();
@@ -835,7 +872,8 @@ impl AppState {
 fn tab_index(tab: Tab) -> usize {
     match tab {
         Tab::Camera => 0,
-        Tab::Settings => 1,
+        Tab::Looks => 1,
+        Tab::Settings => 2,
     }
 }
 

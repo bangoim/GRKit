@@ -13,6 +13,7 @@ env_logger = "0.11"
 log = "0.4"
 # Official release verification and package assembly.
 grkit-core = { path = "../crates/grkit-core" }
+anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 async-channel = "2"
@@ -61,6 +62,10 @@ objc2-ui-kit = { version = "0.3.2", default-features = false, features = [
 ] }
 block2 = "0.6.2"
 dispatch2 = "0.3.1"
+
+# Optimize the LUT fit and previews in debug builds and tests too.
+[profile.dev.package.grkit-core]
+opt-level = 3
 
 [dev-dependencies]
 nsh-engine = "0.5.1"

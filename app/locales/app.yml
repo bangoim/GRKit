@@ -380,3 +380,356 @@ android.error.bt_body:
 android.error.wifi_body:
   en: Select the camera in the network prompt. On Android 13 or later, allow Nearby devices for GRKit. On Android 12 or earlier, allow Location and turn on Location services.
   zh-CN: 请在网络提示中选择相机。Android 13 及更新版本需允许 GRKit 使用“附近的设备”；Android 12 及更早版本需允许位置权限，并打开定位服务。
+
+# Looks
+tab.looks:
+  en: Looks
+  zh-CN: 效果
+looks.title:
+  en: Looks
+  zh-CN: 效果
+looks.on_camera:
+  en: "On %{model}"
+  zh-CN: "%{model} 上"
+looks.on_camera_short:
+  en: On Camera
+  zh-CN: 相机上
+looks.all:
+  en: All Looks
+  zh-CN: 全部效果
+looks.menu_order:
+  en: In Camera Menu Order
+  zh-CN: 按相机菜单顺序
+looks.edit_order:
+  en: Edit Order
+  zh-CN: 调整顺序
+looks.footer:
+  en: "%{count} looks on the card. %{loaded} of %{max} are loaded."
+  zh-CN: "存储卡上有 %{count} 个效果，已载入 %{loaded} 个，最多 %{max} 个。"
+looks.in_use:
+  en: In Use
+  zh-CN: 使用中
+looks.off:
+  en: Off
+  zh-CN: 已关闭
+looks.not_loaded:
+  en: Not loaded
+  zh-CN: 未载入
+looks.official:
+  en: Official
+  zh-CN: 官方
+looks.imported:
+  en: Imported
+  zh-CN: 导入
+looks.unknown:
+  en: Unknown source
+  zh-CN: 来源未知
+looks.group.negative:
+  en: Negative
+  zh-CN: 负片
+looks.group.slide:
+  en: Slide
+  zh-CN: 反转片
+looks.group.cinema:
+  en: Cinema
+  zh-CN: 电影
+looks.group.instant:
+  en: Instant
+  zh-CN: 拍立得
+looks.group.mono:
+  en: "B&W"
+  zh-CN: 黑白
+looks.filter.all:
+  en: All
+  zh-CN: 全部
+looks.filter.color:
+  en: Color
+  zh-CN: 彩色
+looks.filter.mono:
+  en: "B&W"
+  zh-CN: 黑白
+looks.on_camera_mark:
+  en: On Camera
+  zh-CN: 已在相机上
+looks.add:
+  en: Add
+  zh-CN: 添加
+looks.add_named:
+  en: "Add %{name}"
+  zh-CN: "添加 %{name}"
+looks.adding:
+  en: Adding
+  zh-CN: 正在添加
+looks.import_action:
+  en: Import a Look
+  zh-CN: 导入效果
+looks.loading:
+  en: Reading the looks…
+  zh-CN: 正在读取效果…
+looks.catalog_loading:
+  en: Loading the looks…
+  zh-CN: 正在加载效果…
+looks.catalog_offline:
+  en: Connect to the internet once to download the official looks.
+  zh-CN: 需要联网一次来下载官方效果。
+looks.catalog_unsupported:
+  en: This firmware has no official looks.
+  zh-CN: 这个固件没有官方效果。
+looks.no_camera_title:
+  en: No Camera Connected
+  zh-CN: 未连接相机
+looks.no_camera_body:
+  en: Connect your camera to see and change its looks.
+  zh-CN: 连接相机后，可以查看和修改它的效果。
+looks.connect:
+  en: Connect
+  zh-CN: 连接
+looks.no_camera_note:
+  en: You can browse All Looks without a camera.
+  zh-CN: 不连接相机也可以浏览全部效果。
+looks.pending_title:
+  en: An update is waiting on the camera
+  zh-CN: 相机上有等待中的更新
+looks.pending_body:
+  en: Install or cancel it on the camera. Then you can change looks.
+  zh-CN: 在相机上安装或取消它后，才能修改效果。
+looks.read_failed:
+  en: Could not read the looks on the camera.
+  zh-CN: 无法读取相机上的效果。
+looks.retry:
+  en: Try Again
+  zh-CN: 重试
+looks.show_in_menu:
+  en: Show in Camera Menu
+  zh-CN: 在相机菜单中显示
+looks.show_note:
+  en: Off hides it in the camera menu. It stays on the card.
+  zh-CN: 关闭后，它不在相机菜单中显示，但仍保留在存储卡上。
+looks.group:
+  en: Group
+  zh-CN: 类别
+looks.used_by:
+  en: Used By
+  zh-CN: 被使用
+looks.recipes_one:
+  en: 1 recipe
+  zh-CN: 1 个配方
+looks.recipes_many:
+  en: "%{count} recipes"
+  zh-CN: "%{count} 个配方"
+looks.none:
+  en: None
+  zh-CN: 无
+looks.make_copy:
+  en: Make an Editable Copy
+  zh-CN: 创建可编辑副本
+looks.copy_note:
+  en: Official looks keep their name and cover. A copy can be renamed.
+  zh-CN: 官方效果不能改名称和封面，副本可以。
+looks.delete:
+  en: Delete Look
+  zh-CN: 删除效果
+looks.name:
+  en: Name
+  zh-CN: 名称
+looks.cover:
+  en: Cover
+  zh-CN: 封面
+looks.source:
+  en: Source
+  zh-CN: 来源
+looks.source_file:
+  en: File
+  zh-CN: 文件
+looks.replace:
+  en: Replace with Another File
+  zh-CN: 换用其他文件
+looks.loaded:
+  en: Loaded
+  zh-CN: 已载入
+looks.sample_credit:
+  en: "Sample photo: MIKI Yoshihito, CC BY 2.0"
+  zh-CN: 样张：MIKI Yoshihito，CC BY 2.0
+looks.delete_title:
+  en: "Delete %{name}?"
+  zh-CN: "删除 %{name}？"
+looks.delete_body:
+  en: It is removed from the card.
+  zh-CN: 它会从存储卡上删除。
+looks.delete_active_body:
+  en: It is the look in use. The camera switches to Off.
+  zh-CN: 这是正在使用的效果，相机会切换为关闭。
+looks.cannot_delete_title:
+  en: "Can’t Delete %{name}"
+  zh-CN: "无法删除 %{name}"
+looks.cannot_delete_body:
+  en: Recipes use this look. Change those recipes first.
+  zh-CN: 有配方使用这个效果，请先修改这些配方。
+looks.cancel:
+  en: Cancel
+  zh-CN: 取消
+looks.delete_action:
+  en: Delete
+  zh-CN: 删除
+looks.ok:
+  en: OK
+  zh-CN: 好
+looks.order_title:
+  en: Menu Order
+  zh-CN: 菜单顺序
+looks.order_note:
+  en: Drag a look to move it. The camera menu uses this order.
+  zh-CN: 拖动效果来调整位置，相机菜单使用相同的顺序。
+looks.done:
+  en: Done
+  zh-CN: 完成
+looks.move:
+  en: "Move %{name}"
+  zh-CN: "移动 %{name}"
+looks.move_up:
+  en: Move Up
+  zh-CN: 上移
+looks.move_down:
+  en: Move Down
+  zh-CN: 下移
+looks.rename_title:
+  en: Rename
+  zh-CN: 重命名
+looks.name_note:
+  en: The camera menu shows this name. Use up to 16 English letters, digits or symbols.
+  zh-CN: 相机菜单显示这个名称。最多 16 个英文字母、数字或符号。
+looks.save:
+  en: Save
+  zh-CN: 保存
+looks.import_title:
+  en: Import a Look
+  zh-CN: 导入效果
+looks.import_body:
+  en: Make a look from a file on your phone.
+  zh-CN: 用手机上的文件制作效果。
+looks.import_lut:
+  en: LUT File
+  zh-CN: LUT 文件
+looks.import_lut_ext:
+  en: ".cube or LUT image"
+  zh-CN: ".cube 或 LUT 图片"
+looks.import_preset:
+  en: Lightroom Preset
+  zh-CN: Lightroom 预设
+looks.import_preset_ext:
+  en: ".xmp"
+  zh-CN: ".xmp"
+looks.import_note:
+  en: Your phone converts the file. The camera gets the look.
+  zh-CN: 手机转换文件，相机收到的是效果。
+looks.new_title:
+  en: New Look
+  zh-CN: 新效果
+looks.replace_title:
+  en: Replace Look
+  zh-CN: 替换效果
+looks.converting:
+  en: "Converting %{file}…"
+  zh-CN: "正在转换 %{file}…"
+looks.send:
+  en: Send to Camera
+  zh-CN: 发送到相机
+looks.sending:
+  en: Sending…
+  zh-CN: 正在发送…
+looks.send_note:
+  en: It shows up in the camera menu right away.
+  zh-CN: 它会立即出现在相机菜单中。
+looks.choose_again:
+  en: Choose Another File
+  zh-CN: 选择其他文件
+looks.error.lost_title:
+  en: Camera Disconnected
+  zh-CN: 相机已断开
+looks.error.lost_body:
+  en: Reconnect to the camera and try again.
+  zh-CN: 请重新连接相机后再试。
+looks.error.not_ready_title:
+  en: Camera Not Ready
+  zh-CN: 相机未就绪
+looks.error.not_ready_body:
+  en: The card or the camera is busy. Try again in a moment.
+  zh-CN: 存储卡或相机正忙，请稍后再试。
+looks.error.in_use_title:
+  en: Look Used by Recipes
+  zh-CN: 效果正被配方使用
+looks.error.in_use_body:
+  en: Change the recipes that use this look first.
+  zh-CN: 请先修改使用这个效果的配方。
+looks.error.active_title:
+  en: Look in Use
+  zh-CN: 效果正在使用
+looks.error.active_body:
+  en: Delete it again to switch the camera to Off.
+  zh-CN: 再次删除会让相机切换为关闭。
+looks.error.official_title:
+  en: Official Look
+  zh-CN: 官方效果
+looks.error.official_body:
+  en: Official looks keep their name, cover and content. Make an editable copy instead.
+  zh-CN: 官方效果不能修改名称、封面和内容。可以创建可编辑副本。
+looks.error.full_title:
+  en: No Room on the Camera
+  zh-CN: 相机没有空间
+looks.error.full_body:
+  en: The camera has loaded all the looks it can. Turn one off first.
+  zh-CN: 相机能载入的效果已满，请先关闭一个效果。
+looks.error.pending_title:
+  en: An Update Is Waiting
+  zh-CN: 有等待中的更新
+looks.error.pending_body:
+  en: Install or cancel it on the camera. Then you can change looks.
+  zh-CN: 在相机上安装或取消它后，才能修改效果。
+looks.error.off_title:
+  en: Phone Changes Are Off
+  zh-CN: 手机修改已关闭
+looks.error.off_body:
+  en: The camera does not accept changes from the phone now.
+  zh-CN: 相机现在不接受手机的修改。
+looks.error.busy_title:
+  en: Camera Busy
+  zh-CN: 相机正忙
+looks.error.busy_body:
+  en: Another change is running. Try again in a moment.
+  zh-CN: 另一项修改正在进行，请稍后再试。
+looks.error.changed_title:
+  en: Looks Changed
+  zh-CN: 效果已变化
+looks.error.changed_body:
+  en: The looks changed on the camera. Check them and try again.
+  zh-CN: 相机上的效果有变化，请确认后再试。
+looks.error.live_title:
+  en: Not Available on This Camera
+  zh-CN: 这台相机不支持
+looks.error.live_body:
+  en: This camera cannot change looks while it is on.
+  zh-CN: 这台相机不能在开机时修改效果。
+looks.error.name_title:
+  en: Invalid Name
+  zh-CN: 名称无效
+looks.error.name_body:
+  en: Use 1 to 16 English letters, digits or symbols.
+  zh-CN: 请使用 1 到 16 个英文字母、数字或符号。
+looks.error.gone_title:
+  en: Look Not Found
+  zh-CN: 找不到效果
+looks.error.gone_body:
+  en: The look is no longer on the camera.
+  zh-CN: 这个效果已不在相机上。
+looks.error.import_title:
+  en: Cannot Convert the File
+  zh-CN: 无法转换文件
+looks.error.import_body:
+  en: Choose a .cube file, a LUT image, or a Lightroom .xmp preset.
+  zh-CN: 请选择 .cube 文件、LUT 图片或 Lightroom .xmp 预设。
+looks.error.service_title:
+  en: Change Failed
+  zh-CN: 修改失败
+looks.error.service_body:
+  en: The camera refused the change.
+  zh-CN: 相机拒绝了这次修改。

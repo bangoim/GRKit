@@ -1490,6 +1490,7 @@ dependencies = [
 name = "grkit-app"
 version = "1.0.0"
 dependencies = [
+ "anyhow",
  "async-channel",
  "base64 0.22.1",
  "block2",

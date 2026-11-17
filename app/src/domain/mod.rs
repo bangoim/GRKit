@@ -7,8 +7,11 @@ mod camera;
 mod connect_flow;
 mod event_filter;
 mod fake;
+pub mod fake_looks;
 mod http_api;
 mod link;
+pub mod look_media;
+pub mod looks;
 mod nearby_prompt;
 mod remembered;
 mod update;
@@ -35,6 +38,10 @@ pub use http_api::{
 };
 pub use link::{
     CameraLink, CameraStatus, LinkError, NearbyCamera, SendProgress, UpdatePoll, block_on_ready,
+};
+pub use looks::{
+    Catalog, CatalogLook, Look, LookError, LookFilter, LookGroup, LookSource, LooksSnapshot,
+    group_of, look_error, parse_catalog, parse_looks, valid_name,
 };
 pub use nearby_prompt::NearbyPromptGate;
 pub use remembered::{RememberedCamera, decode as decode_remembered, encode as encode_remembered};
