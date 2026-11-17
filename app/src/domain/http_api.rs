@@ -1,6 +1,6 @@
-//! Parse camera HTTP status/package JSON and decide status retries.
+//! Parse camera HTTP props/package JSON and decide readiness retries.
 //!
-//! Shapes match `grkit-serve` (`GET /v1/status`, `GET /v1/package`).
+//! Shapes match `grkit-serve` (`GET /v1/props`, `GET /v1/update` inventory).
 
 use serde::Deserialize;
 
@@ -11,21 +11,37 @@ use super::link::LinkError;
 /// Base URL of the GRKit service on the camera access point.
 pub const CAMERA_HTTP_BASE: &str = "http://192.168.0.1:8080";
 
-/// How long to keep polling `/v1/status` after joining Wi-Fi.
+/// How long to keep polling `/v1/props` after joining Wi-Fi.
 pub const STATUS_POLL_BUDGET_MS: u64 = 30_000;
 
-/// `/v1/status` body from the camera service.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
-pub struct StatusResponse {
-    /// Boot log lines for this power-on, or null when the file is missing.
-    pub boot: Option<serde_json::Value>,
-    pub protocol: u32,
-    /// Seconds from `/proc/uptime` (fractional), or null when unread.
-    pub uptime: Option<f64>,
+#[serde(rename_all = "camelCase")]
+pub struct PropsCamera {
+    pub model: Option<String>,
+    #[serde(alias = "firmware")]
+    pub firmware_version: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct PropsGrkit {
     pub version: Option<String>,
-    /// Update state object, or null when the package folder is not readable yet.
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct PropsStorage {
+    pub state: Option<String>,
+}
+
+/// `/v1/props` body from the camera service.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PropsResponse {
+    pub boot_id: String,
+    pub card_id: Option<String>,
+    pub camera: Option<PropsCamera>,
+    pub grkit: PropsGrkit,
     #[serde(default)]
-    pub update: Option<serde_json::Value>,
+    pub storage: Option<PropsStorage>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -44,12 +60,12 @@ pub struct PackageResponse {
     pub camera: Option<PackageCamera>,
 }
 
-/// Parse a `/v1/status` body.
-pub fn parse_status(body: &str) -> Result<StatusResponse, String> {
+/// Parse a `/v1/props` body.
+pub fn parse_props(body: &str) -> Result<PropsResponse, String> {
     serde_json::from_str(body).map_err(|e| e.to_string())
 }
 
-/// Parse a `/v1/package` body.
+/// Parse an inventory package object (from `GET /v1/update`).
 pub fn parse_package(body: &str) -> Result<PackageResponse, String> {
     serde_json::from_str(body).map_err(|e| e.to_string())
 }
@@ -59,10 +75,10 @@ pub fn should_retry_status(status_code: u16) -> bool {
     status_code == 503
 }
 
-/// Outcome of one `/v1/status` attempt (for the poll loop).
+/// Outcome of one `/v1/props` attempt (for the poll loop).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StatusAttempt {
-    /// Parsed a successful status body.
+    /// Parsed a successful props body.
     Ready,
     /// HTTP 503 — card not ready; retry.
     CardNotReady,
@@ -72,24 +88,24 @@ pub enum StatusAttempt {
     Fatal(LinkError),
 }
 
-/// Classify an HTTP response to `/v1/status` (not transport failures).
-pub fn classify_status_response(status_code: u16, body: &str) -> StatusAttempt {
+/// Classify an HTTP response to `/v1/props` (not transport failures).
+pub fn classify_props_response(status_code: u16, body: &str) -> StatusAttempt {
     if should_retry_status(status_code) {
         return StatusAttempt::CardNotReady;
     }
     if !(200..300).contains(&status_code) {
-        return StatusAttempt::Fatal(LinkError::Http(format!("status HTTP {status_code}")));
+        return StatusAttempt::Fatal(LinkError::Http(format!("props HTTP {status_code}")));
     }
-    match parse_status(body) {
+    match parse_props(body) {
         Ok(_) => StatusAttempt::Ready,
         Err(err) => StatusAttempt::Fatal(LinkError::Http(format!(
-            "status body ({} bytes): {err}",
+            "props body ({} bytes): {err}",
             body.len()
         ))),
     }
 }
 
-/// Which error to surface when the status poll budget runs out.
+/// Which error to surface when the props poll budget runs out.
 pub fn status_poll_timeout_error(last_was_503: bool) -> LinkError {
     if last_was_503 {
         LinkError::CardNotReady
@@ -114,30 +130,25 @@ fn parse_version_parts(v: &str) -> [u32; 3] {
     parts
 }
 
-/// Map a package response into UI models. `fallback_model` is used when the
-/// package omits camera info or a recognizable model string.
-pub fn package_to_models(
-    package: &PackageResponse,
+/// Map installed version + camera metadata into UI models.
+pub fn installed_to_models(
+    version: &str,
+    camera: Option<&PropsCamera>,
     fallback_model: CameraModel,
 ) -> Result<(Camera, PackageInfo), PackageMapError> {
-    let installed = package
-        .version
-        .clone()
-        .filter(|v| !v.is_empty())
-        .ok_or(PackageMapError::NeedsGrkit)?;
+    if version.trim().is_empty() {
+        return Err(PackageMapError::NeedsGrkit);
+    }
+    let installed = version.to_owned();
     // Only GRKit 1.7.0 and later run this service, so an answer is enough:
     // the reported version is not checked again (development builds report
     // the version of their branch).
-    let model = package
-        .camera
-        .as_ref()
+    let model = camera
         .and_then(|c| c.model.as_deref())
         .and_then(model_from_name)
         .unwrap_or(fallback_model);
-    let firmware = package
-        .camera
-        .as_ref()
-        .and_then(|c| c.firmware.clone())
+    let firmware = camera
+        .and_then(|c| c.firmware_version.clone())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "—".into());
     let camera = Camera {
@@ -155,6 +166,24 @@ pub fn package_to_models(
         package_bytes: 0,
     };
     Ok((camera, info))
+}
+
+/// Map a package response into UI models. `fallback_model` is used when the
+/// package omits camera info or a recognizable model string.
+pub fn package_to_models(
+    package: &PackageResponse,
+    fallback_model: CameraModel,
+) -> Result<(Camera, PackageInfo), PackageMapError> {
+    let installed = package
+        .version
+        .clone()
+        .filter(|v| !v.is_empty())
+        .ok_or(PackageMapError::NeedsGrkit)?;
+    let props_camera = package.camera.as_ref().map(|c| PropsCamera {
+        model: c.model.clone(),
+        firmware_version: c.firmware.clone(),
+    });
+    installed_to_models(&installed, props_camera.as_ref(), fallback_model)
 }
 
 /// Why package JSON cannot become a usable camera session.
@@ -176,7 +205,7 @@ fn model_from_name(name: &str) -> Option<CameraModel> {
     }
 }
 
-/// Next delay before another status poll (ms), capped for the 30s budget.
+/// Next delay before another props poll (ms), capped for the 30s budget.
 pub fn status_backoff_ms(attempt: u32) -> u64 {
     let base = 600u64;
     let delay = base.saturating_mul(1u64 << attempt.min(4));
@@ -188,47 +217,34 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // Bodies shaped like `grkit-serve` status/package tests.
-    const STATUS_WITH_UPTIME: &str = r#"{"protocol":1,"version":"1.7.0","uptime":12.5,"boot":["2.0 load","2.1 scan-start","2.2 scan 0"],"update":null}"#;
-    const STATUS_WITHOUT_FILES: &str =
-        r#"{"protocol":1,"version":"1.7.0","uptime":null,"boot":null,"update":null}"#;
+    const PROPS_READY: &str = r#"{"bootId":"boot-1","cardId":"card-1","camera":{"model":"RICOH GR III","firmwareVersion":"2.21"},"grkit":{"version":"1.7.0"},"storage":{"state":"ready"}}"#;
     const PACKAGE_WITH_CAMERA: &str = r#"{"version":"1.7.0","modules":[],"effects":[],"left_out":[],"camera":{"model":"RICOH GR III","firmware":"2.21"}}"#;
     const PACKAGE_CAMERA_NULL: &str = r#"{"version":"1.7.0","modules":[],"effects":[],"left_out":["LEFT_OUT.GRF"],"camera":null}"#;
 
     #[test]
-    fn parses_status_like_service() {
-        let s = parse_status(STATUS_WITH_UPTIME).unwrap();
-        assert_eq!(s.protocol, 1);
-        assert_eq!(s.version.as_deref(), Some("1.7.0"));
-        assert_eq!(s.uptime, Some(12.5));
+    fn parses_props_like_service() {
+        let props = parse_props(PROPS_READY).unwrap();
+        assert_eq!(props.boot_id, "boot-1");
+        assert_eq!(props.card_id.as_deref(), Some("card-1"));
+        assert_eq!(props.grkit.version.as_deref(), Some("1.7.0"));
         assert_eq!(
-            s.boot,
-            Some(json!(["2.0 load", "2.1 scan-start", "2.2 scan 0"]))
+            props.camera.as_ref().and_then(|c| c.model.as_deref()),
+            Some("RICOH GR III")
         );
-        assert!(s.update.as_ref().is_none_or(|v| v.is_null()));
     }
 
     #[test]
-    fn parses_status_with_null_uptime_and_boot() {
-        let s = parse_status(STATUS_WITHOUT_FILES).unwrap();
-        assert!(s.uptime.is_none());
-        assert!(s.boot.is_none());
-    }
-
-    #[test]
-    fn rejects_wrong_status_types_as_parse_error() {
-        // Old app bug: protocol/uptime as string/int-only types.
-        let err = parse_status(r#"{"boot":"ok","protocol":"1","uptime":12,"version":"1.7.0"}"#)
-            .unwrap_err();
-        assert!(err.contains("protocol") || err.contains("invalid type") || !err.is_empty());
+    fn rejects_wrong_props_types_as_parse_error() {
+        let err = parse_props(r#"{"bootId":1,"grkit":{"version":"1.7.0"}}"#).unwrap_err();
+        assert!(!err.is_empty());
     }
 
     #[test]
     fn parse_failure_is_fatal_not_retry() {
-        let body = r#"{"protocol":"1","uptime":12}"#;
-        match classify_status_response(200, body) {
+        let body = r#"{"bootId":1}"#;
+        match classify_props_response(200, body) {
             StatusAttempt::Fatal(LinkError::Http(msg)) => {
-                assert!(msg.contains("status body"));
+                assert!(msg.contains("props body"));
                 assert!(msg.contains(&format!("{} bytes", body.len())));
             }
             other => panic!("expected Fatal, got {other:?}"),
@@ -238,15 +254,18 @@ mod tests {
     #[test]
     fn classifies_503_as_retry_card() {
         assert_eq!(
-            classify_status_response(503, r#"{"error":"The card is not ready. Try again."}"#),
+            classify_props_response(
+                503,
+                r#"{"type":"about:blank","title":"Service Unavailable","status":503,"code":"card_unavailable","detail":"The card is not ready."}"#
+            ),
             StatusAttempt::CardNotReady
         );
     }
 
     #[test]
-    fn classifies_ok_status_as_ready() {
+    fn classifies_ok_props_as_ready() {
         assert_eq!(
-            classify_status_response(200, STATUS_WITH_UPTIME),
+            classify_props_response(200, PROPS_READY),
             StatusAttempt::Ready
         );
     }
@@ -297,6 +316,20 @@ mod tests {
             package_to_models(&p, CameraModel::Gr3),
             Err(PackageMapError::NeedsGrkit)
         );
+    }
+
+    #[test]
+    fn props_to_models() {
+        let props = parse_props(PROPS_READY).unwrap();
+        let (cam, pkg) = installed_to_models(
+            props.grkit.version.as_deref().unwrap(),
+            props.camera.as_ref(),
+            CameraModel::Gr3,
+        )
+        .unwrap();
+        assert_eq!(pkg.installed, "1.7.0");
+        assert_eq!(cam.firmware, "2.21");
+        assert_eq!(json!(props.storage.as_ref().unwrap().state), json!("ready"));
     }
 
     #[test]

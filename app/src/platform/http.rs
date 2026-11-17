@@ -6,7 +6,7 @@ use nsh_core::prelude::*;
 
 use crate::domain::{
     CameraModel, CameraStatus, LinkError, PackageInfo, PackageMapError, STATUS_POLL_BUDGET_MS,
-    StatusAttempt, classify_status_response, package_to_models, parse_package, status_backoff_ms,
+    StatusAttempt, classify_props_response, installed_to_models, parse_props, status_backoff_ms,
     status_poll_timeout_error,
 };
 
@@ -15,12 +15,12 @@ use super::camera_http_base;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
 async fn camera_get(url: String) -> Result<nsh_core::element::HttpResponse, LinkError> {
-    super::camera_request("GET", url, Vec::new(), REQUEST_TIMEOUT)
+    super::camera_request("GET", url, Vec::new(), REQUEST_TIMEOUT, &[])
         .await
         .map_err(|_| LinkError::ConnectionLost)
 }
 
-/// Wait until `/v1/status` answers successfully.
+/// Wait until `/v1/props` answers successfully.
 ///
 /// Retries transport failures and HTTP 503 within the poll budget. A body that
 /// does not parse ends the connect at once. On timeout: all unreachable →
@@ -28,24 +28,24 @@ async fn camera_get(url: String) -> Result<nsh_core::element::HttpResponse, Link
 /// [`LinkError::ConnectionLost`]. A last 503 answer means [`LinkError::CardNotReady`].
 pub async fn wait_until_ready() -> Result<(), LinkError> {
     let base = camera_http_base();
-    app_info!("HTTP wait status at {base}");
+    app_info!("HTTP wait props at {base}");
     let deadline = Instant::now() + Duration::from_millis(STATUS_POLL_BUDGET_MS);
     let mut attempt = 0u32;
     loop {
-        let last_was_503 = match get_status_once(&base).await {
+        let last_was_503 = match get_props_once(&base).await {
             StatusAttempt::Ready => {
-                app_info!("HTTP status ready");
+                app_info!("HTTP props ready");
                 return Ok(());
             }
             StatusAttempt::Fatal(err) => {
-                log::warn!("HTTP status fatal: {err:?}");
+                log::warn!("HTTP props fatal: {err:?}");
                 return Err(err);
             }
             StatusAttempt::CardNotReady => true,
             StatusAttempt::Unreachable => false,
         };
         if Instant::now() >= deadline {
-            log::warn!("HTTP status timed out (last_503={last_was_503})");
+            log::warn!("HTTP props timed out (last_503={last_was_503})");
             return Err(if last_was_503 {
                 status_poll_timeout_error(true)
             } else if probe_camera_api(&base).await {
@@ -60,64 +60,71 @@ pub async fn wait_until_ready() -> Result<(), LinkError> {
     }
 }
 
-/// A valid GRKit status is stronger evidence than iOS association bookkeeping.
+/// A valid GRKit props response is stronger evidence than iOS association bookkeeping.
 #[cfg(target_os = "ios")]
 pub(crate) async fn service_ready() -> bool {
-    get_status_once(&camera_http_base()).await == StatusAttempt::Ready
+    get_props_once(&camera_http_base()).await == StatusAttempt::Ready
 }
 
 /// A mounting card still proves the camera link is alive.
 pub(crate) async fn service_reachable() -> bool {
     matches!(
-        get_status_once(&camera_http_base()).await,
+        get_props_once(&camera_http_base()).await,
         StatusAttempt::Ready | StatusAttempt::CardNotReady
     )
 }
 
-async fn get_status_once(base: &str) -> StatusAttempt {
-    let url = format!("{base}/v1/status");
+async fn get_props_once(base: &str) -> StatusAttempt {
+    let url = format!("{base}/v1/props");
     let response = match camera_get(url).await {
         Ok(response) => response,
         Err(e) => {
-            log::warn!("HTTP status unreachable: {e:?}");
+            log::warn!("HTTP props unreachable: {e:?}");
             return StatusAttempt::Unreachable;
         }
     };
     let body = response.text();
-    let attempt = classify_status_response(response.status(), &body);
+    let attempt = classify_props_response(response.status(), &body);
     if let StatusAttempt::Fatal(LinkError::Http(ref msg)) = attempt
-        && msg.contains("status body")
+        && msg.contains("props body")
     {
-        log::warn!("HTTP status parse failed len={} detail={msg}", body.len());
+        log::warn!("HTTP props parse failed len={} detail={msg}", body.len());
     }
     attempt
 }
 
-/// GET `/v1/package` and map it into UI models.
+/// GET `/v1/props` and map installed GRKit into UI models.
 pub async fn read_package(
     fallback_model: CameraModel,
 ) -> Result<(CameraStatus, PackageInfo), LinkError> {
     let base = camera_http_base();
-    let url = format!("{base}/v1/package");
-    app_info!("HTTP read package at {base}");
+    let url = format!("{base}/v1/props");
+    app_info!("HTTP read props at {base}");
     let response = camera_get(url).await?;
     if response.status() == 503 {
         return Err(LinkError::CardNotReady);
     }
     if !response.ok() {
         return Err(LinkError::Http(format!(
-            "package HTTP {}",
+            "props HTTP {}",
             response.status()
         )));
     }
     let text = response.text();
-    let package = parse_package(&text).map_err(|e| {
-        log::warn!("HTTP package parse failed len={} err={e}", text.len());
-        LinkError::Http(format!("package body ({} bytes): {e}", text.len()))
+    let props = parse_props(&text).map_err(|e| {
+        log::warn!("HTTP props parse failed len={} err={e}", text.len());
+        LinkError::Http(format!("props body ({} bytes): {e}", text.len()))
     })?;
-    let (camera, info) = package_to_models(&package, fallback_model).map_err(|e| match e {
-        PackageMapError::NeedsGrkit => LinkError::NeedsGrkit,
-    })?;
+    let version = props
+        .grkit
+        .version
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .ok_or(LinkError::NeedsGrkit)?;
+    let (camera, info) = installed_to_models(version, props.camera.as_ref(), fallback_model)
+        .map_err(|e| match e {
+            PackageMapError::NeedsGrkit => LinkError::NeedsGrkit,
+        })?;
     Ok((
         CameraStatus {
             camera,

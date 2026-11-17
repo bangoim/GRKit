@@ -418,13 +418,33 @@ pub async fn camera_request(
     url: String,
     body: Vec<u8>,
     budget: Duration,
+    headers: &[(&str, String)],
 ) -> Result<nsh_core::element::HttpResponse, String> {
-    let value = call("http", json!({"method":method,"url":url,"body":STANDARD.encode(body),"timeout_ms":budget.as_millis(),"headers":{"Cache-Control":"no-cache, no-store","Content-Type":"application/zip"}}), budget).await?;
+    let mut header_map = serde_json::Map::new();
+    header_map.insert(
+        "Cache-Control".into(),
+        json!("no-cache, no-store"),
+    );
+    for (name, value) in headers {
+        header_map.insert((*name).into(), json!(value));
+    }
+    let value = call(
+        "http",
+        json!({
+            "method": method,
+            "url": url,
+            "body": STANDARD.encode(body),
+            "timeout_ms": budget.as_millis(),
+            "headers": header_map,
+        }),
+        budget,
+    )
+    .await?;
     let status = value["status"]
         .as_u64()
         .and_then(|v| u16::try_from(v).ok())
         .ok_or("Invalid HTTP status")?;
-    let headers = value["headers"]
+    let response_headers = value["headers"]
         .as_object()
         .map(|h| {
             h.iter()
@@ -441,7 +461,7 @@ pub async fn camera_request(
             status_text: String::new(),
             url,
             redirected: false,
-            headers,
+            headers: response_headers,
         },
         body,
     })

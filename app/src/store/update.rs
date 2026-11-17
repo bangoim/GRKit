@@ -33,13 +33,17 @@ impl AppState {
         self.release_error.set(None);
         self.root.run(|| {
             spawn(async move {
-                let snapshot = platform::update::snapshot().await;
+                let rollback = platform::update::rollback().await;
                 if self.connect_generation.get() == generation
-                    && let Ok(snapshot) = snapshot
+                    && let Ok(rollback) = rollback
                 {
                     self.package.update(|p| {
                         if let Some(p) = p {
-                            p.rollback = snapshot.rollback.and_then(|r| r.version);
+                            p.rollback = if rollback.available && rollback.allowed {
+                                rollback.version
+                            } else {
+                                None
+                            };
                         }
                     });
                 }
@@ -106,6 +110,7 @@ impl AppState {
             kind,
             baseline: package.installed,
             target,
+            request_id: None,
         };
         self.update_busy.set(true);
         self.update_cancel.set(false);
@@ -119,7 +124,10 @@ impl AppState {
             spawn(async move {
                 let result = self.prepare_and_stage(&intent).await;
                 match result {
-                    Ok(()) => self.monitor_update(intent).await,
+                    Ok(()) => {
+                        let intent = platform::update::load_intent().unwrap_or(intent);
+                        self.monitor_update(intent).await;
+                    }
                     Err(_) if self.update_cancel.get() && !self.has_pending_update() => {
                         self.dismiss_error()
                     }
@@ -135,19 +143,29 @@ impl AppState {
         if state.state != JournalState::None {
             return Err(UpdateError::Service("The camera already has a pending update. Confirm or cancel it on the camera first.".into()));
         }
-        if intent.kind == UpdateKind::Rollback
-            && state.rollback.and_then(|r| r.version).as_deref() != Some(&intent.target)
-        {
-            return Err(UpdateError::Service(
-                "The rollback version changed. Refresh before trying again.".into(),
-            ));
-        }
-        let before = platform::update::package().await?;
+        let before = state.package.clone();
         if before.version.as_deref() != Some(&intent.baseline) {
             return Err(UpdateError::Service(
                 "The camera version changed. Reconnect before updating.".into(),
             ));
         }
+        let rollback = if intent.kind == UpdateKind::Rollback {
+            let rollback = platform::update::rollback().await?;
+            if !(rollback.available && rollback.allowed)
+                || rollback.version.as_deref() != Some(&intent.target)
+            {
+                return Err(UpdateError::Service(
+                    if rollback.available && !rollback.allowed {
+                        rollback.reason
+                    } else {
+                        "The rollback version changed. Refresh before trying again.".into()
+                    },
+                ));
+            }
+            Some(rollback)
+        } else {
+            None
+        };
         let body = if intent.kind == UpdateKind::Install {
             let release = self
                 .release
@@ -190,40 +208,102 @@ impl AppState {
         }
         // Recheck after downloading. Do not overwrite changes made by another client.
         let fresh = platform::update::snapshot().await?;
-        if platform::update::package().await? != before
-            || fresh.state != JournalState::None
-            || (intent.kind == UpdateKind::Rollback
-                && fresh.rollback.and_then(|r| r.version).as_deref() != Some(&intent.target))
-        {
+        if fresh.package != before || fresh.state != JournalState::None {
             return Err(UpdateError::Service(
                 "The camera package changed while preparing the update. Reconnect and try again."
                     .into(),
             ));
         }
+        let rollback = if let Some(expected) = rollback {
+            let fresh_rollback = platform::update::rollback().await?;
+            if fresh_rollback.version != expected.version
+                || fresh_rollback.target_identity != expected.target_identity
+                || !(fresh_rollback.available && fresh_rollback.allowed)
+            {
+                return Err(UpdateError::Service(
+                    "The camera package changed while preparing the update. Reconnect and try again."
+                        .into(),
+                ));
+            }
+            Some(fresh_rollback)
+        } else {
+            None
+        };
         if self.update_cancel.get() {
             self.dismiss_error();
             return Ok(());
         }
         platform::update::save_intent(intent)?;
         // Do not abort an in-flight PUT: cancellation must run after it settles.
-        let staged = platform::update::stage(intent.kind, body).await;
+        let staged = match intent.kind {
+            UpdateKind::Install => {
+                platform::update::stage(
+                    UpdateKind::Install,
+                    body,
+                    &fresh.etag,
+                    &fresh.boot_id,
+                    &fresh.card_id,
+                )
+                .await
+            }
+            UpdateKind::Rollback => {
+                let rollback = rollback.expect("rollback checked before staging");
+                let identity = rollback.target_identity.ok_or_else(|| {
+                    UpdateError::Service("The rollback target identity is unavailable.".into())
+                })?;
+                platform::update::stage_rollback(
+                    &identity,
+                    &rollback.etag,
+                    &rollback.boot_id,
+                    &rollback.card_id,
+                )
+                .await
+            }
+        };
         if self.update_cancel.get() {
-            platform::update::cancel().await?;
+            if let Ok(request_id) = &staged {
+                let _ = self.cancel_staged(intent.kind, request_id).await;
+            } else if let Some(request_id) = platform::update::snapshot()
+                .await
+                .ok()
+                .and_then(|s| s.request_id)
+            {
+                let _ = self.cancel_staged(intent.kind, &request_id).await;
+            }
             platform::update::clear_intent();
             self.dismiss_error();
             return Ok(());
         }
-        if let Err(error) = staged {
-            // Only a fresh camera response can resolve an uncertain mutation.
-            if platform::update::snapshot()
-                .await
-                .is_ok_and(|s| s.state == JournalState::None)
-            {
-                platform::update::clear_intent();
+        match staged {
+            Ok(request_id) => {
+                let mut intent = intent.clone();
+                intent.request_id = Some(request_id);
+                platform::update::save_intent(&intent)?;
+                Ok(())
             }
-            return Err(error);
+            Err(error) => {
+                // Only a fresh camera response can resolve an uncertain mutation.
+                if platform::update::snapshot()
+                    .await
+                    .is_ok_and(|s| s.state == JournalState::None)
+                {
+                    platform::update::clear_intent();
+                }
+                Err(error)
+            }
         }
-        Ok(())
+    }
+
+    async fn cancel_staged(self, kind: UpdateKind, request_id: &str) -> Result<(), UpdateError> {
+        let snapshot = platform::update::snapshot().await?;
+        let (boot_id, card_id) = match kind {
+            UpdateKind::Install => (snapshot.boot_id, snapshot.card_id),
+            UpdateKind::Rollback => {
+                let rollback = platform::update::rollback().await?;
+                (rollback.boot_id, rollback.card_id)
+            }
+        };
+        platform::update::cancel(kind, request_id, &boot_id, &card_id).await
     }
 
     pub(super) fn resume_update(self) {
@@ -256,7 +336,7 @@ impl AppState {
         let mut failures = 0;
         loop {
             if self.update_cancel.get() {
-                match platform::update::cancel().await {
+                match self.cancel_active(&intent).await {
                     Ok(()) => {
                         platform::update::clear_intent();
                         self.dismiss_error();
@@ -283,14 +363,13 @@ impl AppState {
             }
             let result = async {
                 let state = platform::update::snapshot().await?;
-                let package = platform::update::package().await?;
-                Ok::<_, UpdateError>((state, package))
+                Ok::<_, UpdateError>(state)
             }
             .await;
             match result {
-                Ok((state, package)) => {
+                Ok(state) => {
                     failures = 0;
-                    let version = package.version.as_deref().unwrap_or_default();
+                    let version = state.package.version.as_deref().unwrap_or_default();
                     match observe_update(state.state, version, &intent.target) {
                         UpdateObservation::Waiting => {
                             let deadline = *self
@@ -346,6 +425,18 @@ impl AppState {
         }
     }
 
+    async fn cancel_active(self, intent: &UpdateIntent) -> Result<(), UpdateError> {
+        let request_id = if let Some(id) = intent.request_id.clone() {
+            id
+        } else {
+            let snapshot = platform::update::snapshot().await?;
+            snapshot.request_id.ok_or_else(|| {
+                UpdateError::Service("The camera has no cancellable update request.".into())
+            })?
+        };
+        self.cancel_staged(intent.kind, &request_id).await
+    }
+
     async fn refresh_camera_package(self) {
         let model = self
             .status
@@ -358,13 +449,24 @@ impl AppState {
             package.available = self
                 .release
                 .with(|slot| slot.borrow().as_ref().map(|r| r.version.clone()));
-            if let Ok(state) = platform::update::snapshot().await {
-                package.rollback = state.rollback.and_then(|r| r.version);
+            if let Ok(rollback) = platform::update::rollback().await {
+                package.rollback = if rollback.available && rollback.allowed {
+                    rollback.version
+                } else {
+                    None
+                };
             }
-            self.status.set(Some(CameraStatus {
-                camera,
-                powered_on: true,
-            }));
+            // Prefer camera metadata from the live props read when package omits it.
+            if camera.firmware == "—"
+                && let Ok((status, _)) = platform::http::read_package(model).await
+            {
+                self.status.set(Some(status));
+            } else {
+                self.status.set(Some(CameraStatus {
+                    camera,
+                    powered_on: true,
+                }));
+            }
             self.package.set(Some(package));
         }
     }

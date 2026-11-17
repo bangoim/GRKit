@@ -213,17 +213,20 @@ pub(crate) async fn camera_request(
     url: String,
     body: Vec<u8>,
     budget: std::time::Duration,
+    headers: &[(&str, String)],
 ) -> Result<nsh_core::element::HttpResponse, String> {
     #[cfg(target_os = "android")]
     {
-        android::camera_request(method, url, body, budget).await
+        android::camera_request(method, url, body, budget, headers).await
     }
     #[cfg(not(target_os = "android"))]
     {
         let mut request = nsh_core::platform::HttpRequest::new(method, url)
-            .header("Cache-Control", "no-cache, no-store")
-            .header("Content-Type", "application/zip")
-            .body(body);
+            .header("Cache-Control", "no-cache, no-store");
+        for (name, value) in headers {
+            request = request.header(*name, value.clone());
+        }
+        let mut request = request.body(body);
         request.follow_redirects = false;
         with_timeout(nsh_core::prelude::fetch(request), budget)
             .await

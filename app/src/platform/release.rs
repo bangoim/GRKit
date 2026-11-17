@@ -620,6 +620,8 @@ mod tests {
                 camera: &camera::GR3,
                 runtime: Default::default(),
                 modules: [("FILMLOOK.GRM".into(), "0".repeat(64))].into(),
+                official_looks: Default::default(),
+                data_formats: Default::default(),
             },
             statement_bytes: vec![],
             signature: vec![],

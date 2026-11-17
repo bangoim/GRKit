@@ -9,7 +9,7 @@ use std::{
 };
 
 use grkit_app::App;
-use nsh_core::platform::Os;
+use nsh_core::platform::{HttpBody, HttpRequest, Os};
 use nsh_engine::{EngineConfig, Root};
 use nsh_testing::{DialogAnswer, Headless, StubNetwork, StubResponse, StubRoute};
 use serde_json::json;
@@ -72,6 +72,8 @@ struct Camera {
     version: &'static str,
     journal: &'static str,
     rollback_available: bool,
+    rollback_allowed: bool,
+    request_id: Option<String>,
 }
 
 fn json_response(body: serde_json::Value) -> StubResponse {
@@ -79,6 +81,47 @@ fn json_response(body: serde_json::Value) -> StubResponse {
     response.status = 200;
     response.body = serde_json::to_vec(&body).unwrap();
     response
+}
+
+fn with_context(mut response: StubResponse) -> StubResponse {
+    response.headers = vec![
+        ("ETag".into(), "\"sha256:test\"".into()),
+        ("X-GRKit-Boot-Id".into(), "boot-test".into()),
+        ("X-GRKit-Card-Id".into(), "card-test".into()),
+    ];
+    response
+}
+
+fn require_context(request: &HttpRequest) {
+    assert!(
+        request
+            .headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("X-GRKit-Request-Id")),
+        "mutation requires X-GRKit-Request-Id"
+    );
+    assert!(
+        request
+            .headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("X-GRKit-Boot-Id") && v == "boot-test"),
+        "mutation requires matching boot id"
+    );
+    assert!(
+        request
+            .headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("X-GRKit-Card-Id") && v == "card-test"),
+        "mutation requires matching card id"
+    );
+}
+
+fn request_body(request: &HttpRequest) -> &[u8] {
+    match &request.body {
+        HttpBody::Bytes(bytes) => bytes,
+        HttpBody::Empty => &[],
+        HttpBody::Stream => panic!("unexpected streamed body"),
+    }
 }
 
 fn start_phone(environment: &TestEnvironment) -> (Headless, Arc<Mutex<Camera>>, Arc<StubNetwork>) {
@@ -93,44 +136,129 @@ fn start_phone_with_delay(
         version: "1.7.0",
         journal: "none",
         rollback_available: true,
+        rollback_allowed: true,
+        request_id: None,
     }));
     let handler_camera = camera.clone();
     let handler = StubRoute::Handler(Arc::new(move |request, reply| {
         let mut camera = handler_camera.lock().unwrap();
         let body = match (request.method.as_str(), request.url.as_str()) {
-            ("GET", "http://camera.test/v1/status") => json!({
-                "protocol": 1, "version": camera.version, "uptime": 60,
-                "boot": [], "update": {"state": camera.journal, "rollback": null},
-            }),
-            ("GET", "http://camera.test/v1/package") => json!({
-                "version": camera.version, "modules": [], "effects": [], "left_out": [],
-                "camera": {"model": "RICOH GR III", "firmware": "2.21"},
+            ("GET", "http://camera.test/v1/props") => json!({
+                "bootId": "boot-test",
+                "cardId": "card-test",
+                "camera": {"model": "RICOH GR III", "firmwareVersion": "2.21"},
+                "grkit": {"version": camera.version},
+                "storage": {"state": "ready", "writable": true, "freeBytes": 1_000_000_000u64},
+                "runtime": {"state": "ready", "busyReason": null},
+                "writeAccess": {"allowed": true, "reason": null},
+                "capabilities": {
+                    "looks": {"read": true, "write": true, "hotReload": false},
+                    "recipes": {"read": false, "write": false},
+                    "moduleSettings": {"read": false, "write": false}
+                },
+                "limits": {},
+                "activeRequests": []
             }),
             ("GET", "http://camera.test/v1/update") => json!({
-                "state": camera.journal,
-                "rollback": if camera.rollback_available && camera.journal == "none" {
-                    json!({"version": "1.6.1"})
-                } else { json!(null) },
+                "inventory": {
+                    "package": {
+                        "version": camera.version,
+                        "modules": [],
+                        "effects": [],
+                        "left_out": []
+                    },
+                    "contentHashes": {},
+                    "state": camera.journal,
+                    "backup": if camera.rollback_available && camera.journal == "none" {
+                        json!({"version": "1.6.1"})
+                    } else {
+                        json!(null)
+                    }
+                },
+                "request": camera.request_id.as_ref().map(|id| json!({
+                    "requestId": id,
+                    "domain": "rollback",
+                    "status": "running",
+                    "phase": if camera.journal == "confirmed" { "awaitingRestart" } else { "awaitingConfirmation" }
+                })),
+                "configurationRevision": null
             }),
-            ("PUT", "http://camera.test/v1/rollback") => {
+            ("GET", "http://camera.test/v1/rollback") => json!({
+                "backup": {
+                    "available": camera.rollback_available,
+                    "allowed": camera.rollback_allowed,
+                    "reason": if camera.rollback_allowed { "ok" } else { "data_format_incompatible" },
+                    "identity": if camera.rollback_available {
+                        json!({"digest": "rollback-digest", "contentHashes": {}})
+                    } else {
+                        json!(null)
+                    },
+                    "version": if camera.rollback_available { json!("1.6.1") } else { json!(null) },
+                    "trustedFormatSupport": [1]
+                },
+                "request": camera.request_id.as_ref().map(|id| json!({
+                    "requestId": id,
+                    "domain": "rollback",
+                    "status": "running",
+                    "phase": if camera.journal == "confirmed" { "awaitingRestart" } else { "awaitingConfirmation" }
+                })),
+                "configurationRevision": null
+            }),
+            ("POST", "http://camera.test/v1/rollback") => {
+                require_context(&request);
                 assert!(
-                    request.body.is_empty(),
-                    "rollback must not upload an archive"
+                    request
+                        .headers
+                        .iter()
+                        .any(|(k, _)| k.eq_ignore_ascii_case("If-Match")),
+                    "rollback requires If-Match"
                 );
+                let body: serde_json::Value = serde_json::from_slice(request_body(&request)).unwrap();
+                assert_eq!(body["targetIdentity"], "rollback-digest");
                 assert_eq!(camera.journal, "none");
+                let id = request
+                    .headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("X-GRKit-Request-Id"))
+                    .map(|(_, v)| v.clone())
+                    .expect("request id");
                 camera.journal = "waiting";
-                json!({"state": "waiting", "version": "1.6.1", "install": 3, "remove": 0})
+                camera.request_id = Some(id.clone());
+                json!({
+                    "requestId": id,
+                    "domain": "rollback",
+                    "status": "running",
+                    "phase": "awaitingConfirmation",
+                    "cancellable": true,
+                    "requiredAction": "confirmOnCamera",
+                    "result": null,
+                    "error": null
+                })
             }
-            ("DELETE", "http://camera.test/v1/update") => {
+            ("POST", "http://camera.test/v1/rollback/cancel")
+            | ("POST", "http://camera.test/v1/update/cancel") => {
+                require_context(&request);
+                let body: serde_json::Value = serde_json::from_slice(request_body(&request)).unwrap();
+                assert_eq!(
+                    body["targetRequestId"].as_str(),
+                    camera.request_id.as_deref()
+                );
                 camera.journal = "none";
-                json!({"state": "none", "cancelled": true})
+                camera.request_id = None;
+                json!({
+                    "requestId": body["targetRequestId"],
+                    "domain": "rollback",
+                    "status": "succeeded",
+                    "phase": "completed",
+                    "targetRequest": {"status": "cancelled"}
+                })
             }
             _ => panic!(
                 "unexpected camera request: {} {}",
                 request.method, request.url
             ),
         };
-        let mut response = json_response(body);
+        let mut response = with_context(json_response(body));
         response.delay = delay;
         reply.send(response);
     }));
@@ -140,7 +268,7 @@ fn start_phone_with_delay(
     let network = Arc::new(StubNetwork::new([
         ("GET http://camera.test/*".into(), handler.clone()),
         ("PUT http://camera.test/*".into(), handler.clone()),
-        ("DELETE http://camera.test/*".into(), handler),
+        ("POST http://camera.test/*".into(), handler),
         (
             "GET https://release.test/*".into(),
             StubRoute::Response(release_missing),
@@ -177,6 +305,7 @@ fn rollback_verifies_the_version_after_camera_confirmation_and_restart() {
         camera.journal = "none";
         camera.version = "1.6.1";
         camera.rollback_available = false;
+        camera.request_id = None;
     }
     app.press("Check Installed Version").unwrap();
     app.wait_for_within("GRKit 1.6.1 Is Restored", WAIT)
@@ -187,7 +316,7 @@ fn rollback_verifies_the_version_after_camera_confirmation_and_restart() {
         network
             .requests()
             .iter()
-            .filter(|r| r.method == "PUT")
+            .filter(|r| r.method == "POST" && r.url.ends_with("/v1/rollback"))
             .count(),
         1
     );
@@ -195,7 +324,7 @@ fn rollback_verifies_the_version_after_camera_confirmation_and_restart() {
 }
 
 #[test]
-fn cancelling_rollback_deletes_and_verifies_the_camera_journal() {
+fn cancelling_rollback_posts_cancel_and_verifies_the_camera_journal() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let environment = TestEnvironment::new();
     let (mut app, camera, network) = start_phone(&environment);
@@ -204,12 +333,12 @@ fn cancelling_rollback_deletes_and_verifies_the_camera_journal() {
     app.wait_for_gone("Confirm Roll Back on the Camera", WAIT)
         .unwrap();
     let requests = network.requests();
-    let deletion = requests
+    let cancellation = requests
         .iter()
-        .position(|r| r.method == "DELETE")
+        .position(|r| r.method == "POST" && r.url.ends_with("/v1/rollback/cancel"))
         .expect("cancel must reach the camera");
     assert!(
-        requests[deletion + 1..]
+        requests[cancellation + 1..]
             .iter()
             .any(|r| r.method == "GET" && r.url.ends_with("/v1/update")),
         "cancel must verify the resulting journal"
@@ -224,7 +353,11 @@ fn vanished_journal_with_the_old_version_is_not_reported_as_success() {
     let environment = TestEnvironment::new();
     let (mut app, camera, network) = start_phone(&environment);
     begin_rollback(&mut app);
-    camera.lock().unwrap().journal = "none";
+    {
+        let mut camera = camera.lock().unwrap();
+        camera.journal = "none";
+        camera.request_id = None;
+    }
     app.wait_for_within("Not Confirmed", WAIT).unwrap();
     app.wait_for_gone("GRKit 1.6.1 Is Restored", WAIT).unwrap();
     assert_eq!(camera.lock().unwrap().version, "1.7.0");
@@ -247,7 +380,10 @@ fn stale_rollback_selection_does_not_mutate_the_camera() {
         WAIT,
     )
     .unwrap();
-    assert!(!network.requests().iter().any(|r| r.method == "PUT"));
+    assert!(!network
+        .requests()
+        .iter()
+        .any(|r| r.method == "POST" && r.url.ends_with("/v1/rollback")));
 }
 
 #[test]
