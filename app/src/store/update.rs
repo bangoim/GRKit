@@ -353,8 +353,9 @@ impl AppState {
                     .get()
                     .map(|s| s.camera.model)
                     .unwrap_or(CameraModel::Gr3);
-                match platform::connect_camera(&intent.camera_id, model, |_| {}).await {
-                    Ok((status, _, _)) => self.status.set(Some(status)),
+                let options = super::warmup::options_for(&intent.camera_id);
+                match platform::connect_camera(&intent.camera_id, model, options, |_| {}).await {
+                    Ok(connected) => self.status.set(Some(connected.status)),
                     Err(_) => {
                         self.fail_update(UpdateError::ConnectionLost);
                         return;

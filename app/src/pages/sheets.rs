@@ -412,12 +412,17 @@ fn connecting(app: AppState, step: u8) -> impl IntoElement {
 }
 
 fn connect_error_sheet(app: AppState, error: LinkError) -> impl IntoElement {
+    use crate::domain::ErrorAction;
     let title = link_error_title(&error);
     let body = link_error_body(&error);
-    let retry = !matches!(
-        error,
-        LinkError::NeedsGrkit | LinkError::BluetoothUnavailable
-    );
+    let action = error.copy().2;
+    let retry = matches!(action, ErrorAction::Retry | ErrorAction::RetryOrSettings);
+    let settings = matches!(action, ErrorAction::Settings | ErrorAction::RetryOrSettings);
+    let open_settings = || {
+        spawn(async {
+            crate::platform::open_app_settings().await;
+        });
+    };
     sheet_shell(
         title,
         Some(body),
@@ -433,9 +438,15 @@ fn connect_error_sheet(app: AppState, error: LinkError) -> impl IntoElement {
                     move || app.retry_connect()
                 })
                 .into_element()
+            } else if settings {
+                sheet_primary_button(tr("conn.open_settings", &[]), open_settings).into_element()
             } else {
                 view().into_element()
             })
+            .child(
+                (retry && settings)
+                    .then(|| secondary_button(tr("conn.open_settings", &[]), open_settings)),
+            )
             .child(secondary_button(tr("error.close", &[]), move || {
                 app.dismiss_connect_error()
             })),

@@ -5,14 +5,15 @@
 mod advertisement;
 mod camera;
 mod connect_flow;
+pub mod connect_policy;
 mod event_filter;
 mod fake;
 pub mod fake_looks;
-mod http_api;
+pub(crate) mod http_api;
 mod link;
 pub mod look_media;
 pub mod looks;
-mod nearby_prompt;
+pub mod nearby_watch;
 mod remembered;
 mod update;
 mod update_api;
@@ -26,7 +27,8 @@ mod wifi_cred;
 pub use advertisement::{Advertisement, is_supported_camera, model_from_code, parse_advertisement};
 pub use camera::{Camera, CameraModel, ConnectionState, PackageInfo};
 pub use connect_flow::{
-    BleSetup, ConnectStep, ConnectTransport, WifiCredentials, run_connect, timing,
+    BleSetup, ConnectOptions, ConnectReport, ConnectStep, ConnectTransport, Join,
+    LocalNetworkAccess, Probe, WifiCredentials, run_connect, timing,
 };
 pub use event_filter::{ApReadyLatch, is_ble_pairing_error, matches_operation};
 pub use fake::{DemoFail, FakeCamera, FakeConfig};
@@ -37,13 +39,13 @@ pub use http_api::{
     status_poll_timeout_error, version_at_least,
 };
 pub use link::{
-    CameraLink, CameraStatus, LinkError, NearbyCamera, SendProgress, UpdatePoll, block_on_ready,
+    CameraLink, CameraStatus, ErrorAction, LinkError, NearbyCamera, SendProgress, UpdatePoll,
+    block_on_ready,
 };
 pub use looks::{
     Catalog, CatalogLook, Look, LookError, LookFilter, LookGroup, LookSource, LooksSnapshot,
     group_of, look_error, parse_catalog, parse_looks, valid_name,
 };
-pub use nearby_prompt::NearbyPromptGate;
 pub use remembered::{RememberedCamera, decode as decode_remembered, encode as encode_remembered};
 pub use update::{CONFIRM_DEADLINE, UpdateError, UpdateFlow, UpdateKind, UpdatePhase};
 pub use wifi_cred::decode_cred;

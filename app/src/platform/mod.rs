@@ -8,14 +8,24 @@ mod ios;
 mod stub;
 
 pub(crate) mod http;
+pub(crate) mod link_support;
 pub(crate) mod looks;
 pub(crate) mod release;
 pub(crate) mod update;
 
 use crate::domain::{
-    CAMERA_HTTP_BASE, CameraModel, CameraStatus, ConnectStep, LinkError, NearbyCamera, PackageInfo,
-    RememberedCamera,
+    CAMERA_HTTP_BASE, CameraModel, CameraStatus, ConnectOptions, ConnectReport, ConnectStep,
+    LinkError, PackageInfo, RememberedCamera,
 };
+
+/// A connected camera, and what the attempt taught the warm-up learner
+/// (none for an HTTP-only development connect).
+pub struct Connected {
+    pub status: CameraStatus,
+    pub package: PackageInfo,
+    pub remembered: RememberedCamera,
+    pub report: Option<ConnectReport>,
+}
 
 /// Base URL for camera HTTP. `GRKIT_CAMERA_URL` overrides the on-camera default when set.
 pub fn camera_http_base() -> String {
@@ -94,9 +104,12 @@ pub fn save_remembered(camera: &RememberedCamera) -> Result<(), String> {
     }
 }
 
-/// Start scanning for nearby cameras. Discoveries are pushed on `tx`.
+/// Start scanning for nearby cameras. Each advertisement frame is pushed on `tx`.
 /// When `remembered_id` is set, retrieve that peripheral so reconnect works before a fresh advertisement.
-pub fn start_scanning(tx: async_channel::Sender<Vec<NearbyCamera>>, remembered_id: Option<&str>) {
+pub fn start_scanning(
+    tx: async_channel::Sender<crate::domain::nearby_watch::Frame>,
+    remembered_id: Option<&str>,
+) {
     #[cfg(target_os = "ios")]
     {
         ios::ble::start_scanning(tx, remembered_id);
@@ -148,22 +161,23 @@ pub fn stop_scanning() {
 pub async fn connect_camera(
     peripheral_id: &str,
     model_hint: CameraModel,
+    options: ConnectOptions,
     mut on_step: impl FnMut(ConnectStep),
-) -> Result<(CameraStatus, PackageInfo, RememberedCamera), LinkError> {
+) -> Result<Connected, LinkError> {
     if has_dev_camera_url() {
         return connect_http_only(model_hint, &mut on_step).await;
     }
     #[cfg(target_os = "ios")]
     {
-        ios::link::connect(peripheral_id, model_hint, &mut on_step).await
+        ios::link::connect(peripheral_id, model_hint, options, &mut on_step).await
     }
     #[cfg(target_os = "android")]
     {
-        android::connect_camera(peripheral_id, model_hint, &mut on_step).await
+        android::connect_camera(peripheral_id, model_hint, options, &mut on_step).await
     }
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
-        let _ = (peripheral_id, model_hint, &mut on_step);
+        let _ = (peripheral_id, model_hint, options, &mut on_step);
         stub::connect_camera().await
     }
 }
@@ -172,7 +186,7 @@ pub async fn connect_camera(
 async fn connect_http_only(
     model_hint: CameraModel,
     on_step: &mut dyn FnMut(ConnectStep),
-) -> Result<(CameraStatus, PackageInfo, RememberedCamera), LinkError> {
+) -> Result<Connected, LinkError> {
     app_info!("connect HTTP-only against {}", camera_http_base());
     on_step(ConnectStep::Bluetooth);
     on_step(ConnectStep::Wifi);
@@ -180,7 +194,44 @@ async fn connect_http_only(
     on_step(ConnectStep::Version);
     let (status, package) = http::read_package(model_hint).await?;
     let remembered = RememberedCamera::new("dev-url", status.camera.model, "dev".to_owned());
-    Ok((status, package, remembered))
+    Ok(Connected {
+        status,
+        package,
+        remembered,
+        report: None,
+    })
+}
+
+static CONNECT_DEADLINE_REACHED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// A connect attempt starts: it has not run out of time.
+pub fn begin_connect_attempt() {
+    CONNECT_DEADLINE_REACHED.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The attempt ran out of time and is about to be dropped. Unlike a user
+/// cancel, this leaves the camera's access point on.
+pub fn mark_connect_deadline() {
+    CONNECT_DEADLINE_REACHED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Whether the attempt being dropped ran out of time.
+#[cfg_attr(not(any(target_os = "ios", target_os = "android")), allow(dead_code))]
+pub(crate) fn connect_deadline_reached() -> bool {
+    CONNECT_DEADLINE_REACHED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Open this app's page in the system settings (permissions, Local Network).
+pub async fn open_app_settings() {
+    #[cfg(target_os = "android")]
+    {
+        android::open_app_settings().await;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = nsh_core::prelude::open_url("app-settings:").await;
+    }
 }
 
 /// Bound a platform operation even when its native completion never arrives.

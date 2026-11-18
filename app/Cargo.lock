@@ -1500,6 +1500,7 @@ dependencies = [
  "futures-util",
  "grkit-core",
  "jni 0.21.1",
+ "libc",
  "log",
  "nsh-base",
  "nsh-core",

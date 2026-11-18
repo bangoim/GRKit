@@ -16,6 +16,8 @@ pub fn tr(key: &str, args: &[(&str, &str)]) -> String {
             "connecting.wifi_sub" => "android.connecting.wifi_sub",
             "error.bt_body" => "android.error.bt_body",
             "error.wifi_body" => "android.error.wifi_body",
+            "conn.local_network.body" => "android.conn.local_network.body",
+            "conn.wifi_config.body" => "android.conn.wifi_config.body",
             _ => key,
         }
     } else {
@@ -157,6 +159,7 @@ fn en(key: &str) -> &'static str {
         "error.lost_body" => {
             "Reconnect to check the update status. The camera may still have a pending update."
         }
+        "error.connect_lost_body" => "Keep the camera on and close to your phone, then try again.",
         "error.pair_title" => "Pairing Needed",
         "error.pair_body" => "Complete pairing on the camera, then try again.",
         "error.wifi_title" => "Could Not Join Wi-Fi",
@@ -177,7 +180,9 @@ fn en(key: &str) -> &'static str {
         "settings.gr_snap_name" => "GR Snap",
         "settings.gr_snap_desc" => "Wireless transfer and remote for RICOH GR",
         "settings.view" => "View",
-        _ => crate::strings_looks::en(key).unwrap_or("???"),
+        _ => crate::strings_looks::en(key)
+            .or_else(|| crate::strings_connect::en(key))
+            .unwrap_or("???"),
     }
 }
 
@@ -285,6 +290,7 @@ fn zh(key: &str) -> Option<&'static str> {
         "error.refused_body" => "相机拒绝了此更新包。请确认更新包支持你的相机和固件版本。",
         "error.lost_title" => "连接已断开",
         "error.lost_body" => "请重新连接以检查更新状态。相机上可能仍有待处理的更新。",
+        "error.connect_lost_body" => "请让相机保持开机并靠近手机，然后重试。",
         "error.pair_title" => "需要配对",
         "error.pair_body" => "请先在相机上完成配对，然后重试。",
         "error.wifi_title" => "无法加入 Wi-Fi",
@@ -305,7 +311,9 @@ fn zh(key: &str) -> Option<&'static str> {
         "settings.gr_snap_name" => "GR Snap",
         "settings.gr_snap_desc" => "RICOH GR 的无线传输与遥控",
         "settings.view" => "查看",
-        _ => return crate::strings_looks::zh(key),
+        _ => {
+            return crate::strings_looks::zh(key).or_else(|| crate::strings_connect::zh(key));
+        }
     })
 }
 

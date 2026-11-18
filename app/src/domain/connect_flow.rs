@@ -1,9 +1,15 @@
-//! Connection checklist steps and a transport-driven state machine.
+//! The connect flow: Bluetooth setup, access point warm-up, Wi-Fi join and
+//! readiness, with the retry budgets and recovery steps of `connect_policy`.
+//! Platforms supply the operations through
+//! [`ConnectTransport`]; the flow owns every retry and classification.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
+use crate::domain::connect_policy::{
+    self as policy, JoinOutcome, NetworkSnapshot, RouteState, warmup_delay,
+};
 use crate::domain::{CameraModel, LinkError};
 
 /// Checklist steps shown on the connecting sheet (A4).
@@ -34,9 +40,11 @@ pub struct BleSetup {
     pub model: CameraModel,
     pub powered_on_already: bool,
     pub credentials: WifiCredentials,
+    /// The camera notified that its access point is up.
+    pub ap_ready: bool,
 }
 
-/// Timing constants used by the real link and tests.
+/// Bluetooth timing used by the platform links.
 pub mod timing {
     use super::Duration;
 
@@ -44,71 +52,454 @@ pub mod timing {
     pub const BLE_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
     pub const BLE_CONNECT_ATTEMPTS: u32 = 3;
     pub const BLE_CONNECT_RETRY_DELAY: Duration = Duration::from_secs(2);
+    /// Connect timeouts retried inside one connect call.
+    pub const BLE_CONNECT_TIMEOUT_RETRIES: u32 = 1;
     pub const SCAN_CONNECT_SETTLE: Duration = Duration::from_millis(500);
     pub const NETWORK_TYPE_NOTIFY_TIMEOUT: Duration = Duration::from_secs(2);
     pub const NETWORK_TYPE_NOTIFY_ATTEMPTS: u32 = 2;
     pub const NETWORK_TYPE_RETRY_DELAY: Duration = Duration::from_millis(500);
-    pub const AP_WARMUP_GR3: Duration = Duration::from_millis(1_500);
-    pub const AP_WARMUP_GR4: Duration = Duration::from_millis(8_000);
+}
 
-    pub fn ap_warmup(model: crate::domain::CameraModel) -> Duration {
-        match model {
-            crate::domain::CameraModel::Gr4 => AP_WARMUP_GR4,
-            _ => AP_WARMUP_GR3,
-        }
-    }
+/// How a native join ended without a terminal error.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Join {
+    Joined,
+    /// The system reported a failure that HTTP may still disprove.
+    SoftFailed(LinkError),
+}
+
+/// One readiness probe of the GRKit service.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Probe {
+    /// The service answered with its properties.
+    Reachable,
+    /// The card is still mounting (HTTP 503).
+    CardNotReady,
+    /// Something answered that is not camera JSON (a router page).
+    NotCamera,
+    /// No answer: refused or timed out. The flow tells them apart by time.
+    Failed,
+    /// The service answered in a way no retry fixes.
+    Fatal(LinkError),
+}
+
+/// What the system says about the app's local network access.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocalNetworkAccess {
+    Granted,
+    Denied,
+    /// The check could not tell; it is asked once more.
+    Unknown,
 }
 
 type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
-/// Platform or fake operations the connect machine drives.
+/// Platform or fake operations the connect flow drives.
 pub trait ConnectTransport {
     fn ble_setup(&mut self, peripheral_id: &str) -> BoxFut<'_, Result<BleSetup, LinkError>>;
-    fn join_wifi(&mut self, creds: &WifiCredentials) -> BoxFut<'_, Result<(), LinkError>>;
-    fn wait_status_ready(&mut self) -> BoxFut<'_, Result<(), LinkError>>;
+    /// Return once the app is in the foreground: a join from the background
+    /// fails on older iOS.
+    fn wait_foreground(&mut self) -> BoxFut<'_, ()>;
+    /// Join the camera access point. `force` first removes the saved
+    /// configuration, so the system reassociates instead of reusing a route.
+    fn join_wifi(
+        &mut self,
+        creds: &WifiCredentials,
+        force: bool,
+    ) -> BoxFut<'_, Result<Join, LinkError>>;
+    /// The phone's Wi-Fi interface now.
+    fn network(&mut self) -> BoxFut<'_, NetworkSnapshot>;
+    /// One request to the GRKit service, bounded by `timeout`.
+    fn probe(&mut self, timeout: Duration) -> BoxFut<'_, Probe>;
+    /// Whether the camera's own HTTP API answers, which tells a camera
+    /// without the GRKit service apart from an unreachable one.
+    fn camera_api_answers(&mut self) -> BoxFut<'_, bool>;
     fn read_version(&mut self, model: CameraModel) -> BoxFut<'_, Result<(), LinkError>>;
+    fn pause(&mut self, duration: Duration) -> BoxFut<'_, ()>;
+    /// Monotonic time that advances only while the app is in the foreground.
+    fn clock(&mut self) -> Duration;
+    /// The app's local network access. Platforms without such a permission
+    /// keep the default.
+    fn local_network_access(&mut self) -> BoxFut<'_, LocalNetworkAccess> {
+        Box::pin(async { LocalNetworkAccess::Granted })
+    }
 }
 
-/// Run Bluetooth → Wi-Fi → version, reporting each step as it starts.
+/// A denied local network fails the attempt up front; an undecided check is
+/// asked once more. A failed check never blocks the attempt.
+async fn local_network_denied<T: ConnectTransport>(transport: &mut T) -> bool {
+    transport.wait_foreground().await;
+    let mut access = transport.local_network_access().await;
+    if access == LocalNetworkAccess::Unknown {
+        transport.wait_foreground().await;
+        access = transport.local_network_access().await;
+    }
+    access == LocalNetworkAccess::Denied
+}
+
+/// What the store knows about this camera before the attempt.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConnectOptions {
+    /// Learned warm-up for this camera, if any.
+    pub learned_warmup: Option<Duration>,
+    /// No successful connect within the warm reconnect window.
+    pub cold_start: bool,
+    /// A fresh advertisement says the camera is on, so it needs no wake.
+    pub advertised_powered_on: bool,
+}
+
+/// A connected camera and what the attempt teaches the warm-up learner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnectReport {
+    pub setup: BleSetup,
+    pub first_join: JoinOutcome,
+    pub first_join_elapsed: Duration,
+    /// The first join alone reached the camera.
+    pub first_join_verified: bool,
+}
+
+/// Run Bluetooth setup within the Bluetooth retry budgets.
+async fn ble_stage<T: ConnectTransport>(
+    transport: &mut T,
+    peripheral_id: &str,
+) -> Result<BleSetup, LinkError> {
+    let (mut pairing, mut dropped) = (0u32, 0u32);
+    loop {
+        let error = match transport.ble_setup(peripheral_id).await {
+            Ok(setup) => return Ok(setup),
+            Err(error) => error,
+        };
+        let spent = pairing + dropped;
+        let retry = match error {
+            // The pairing prompt can still be open: give the user time.
+            LinkError::BleAuthentication | LinkError::BleConnectFailed
+                if pairing < policy::MAX_BLE_PAIRING_RETRIES
+                    && spent < policy::MAX_BLE_FLOW_RETRIES =>
+            {
+                pairing += 1;
+                true
+            }
+            LinkError::BleDisconnected
+                if dropped < policy::BLE_PAIRING_REQUIRED_RETRIES
+                    && spent < policy::MAX_BLE_FLOW_RETRIES =>
+            {
+                dropped += 1;
+                true
+            }
+            _ => false,
+        };
+        if retry {
+            transport.pause(policy::BLE_PAIRING_RETRY_DELAY).await;
+            continue;
+        }
+        return Err(match error {
+            LinkError::BleAuthentication => LinkError::PairingFailed,
+            // A second drop leaves the pairing in doubt.
+            LinkError::BleDisconnected => LinkError::NotPaired,
+            LinkError::ConnectionLost => LinkError::BleConnectFailed,
+            other => other,
+        });
+    }
+}
+
+/// What a readiness poll found.
+#[derive(Clone, Debug, Default)]
+struct Readiness {
+    reachable: bool,
+    attempts: u32,
+    quick_rejects: u32,
+    trailing_invalid: u32,
+    any_invalid: bool,
+    last_card_not_ready: bool,
+    subnet_conflict: bool,
+    deadline: Duration,
+}
+
+impl Readiness {
+    fn quick_reject_only(&self) -> bool {
+        self.attempts > 0 && self.quick_rejects == self.attempts
+    }
+}
+
+/// Poll the service within `deadline` of foreground time. A run of refused
+/// probes consults the route and ends early on a proven address conflict.
+async fn poll_readiness<T: ConnectTransport>(
+    transport: &mut T,
+    deadline: Duration,
+) -> Result<Readiness, LinkError> {
+    let mut r = Readiness {
+        deadline,
+        ..Readiness::default()
+    };
+    let mut consults = 0;
+    let start = transport.clock();
+    loop {
+        let remaining = deadline.saturating_sub(transport.clock() - start);
+        if remaining.is_zero() {
+            break;
+        }
+        r.attempts += 1;
+        let budget = remaining.min(policy::READINESS_PROBE_TIMEOUT);
+        let probe_start = transport.clock();
+        let probe = transport.probe(budget).await;
+        let elapsed = transport.clock() - probe_start;
+        match probe {
+            Probe::Reachable => {
+                r.reachable = true;
+                return Ok(r);
+            }
+            Probe::Fatal(error) => return Err(error),
+            Probe::NotCamera => {
+                r.trailing_invalid += 1;
+                r.any_invalid = true;
+            }
+            Probe::CardNotReady | Probe::Failed => r.trailing_invalid = 0,
+        }
+        r.last_card_not_ready = probe == Probe::CardNotReady;
+        if elapsed + policy::QUICK_REJECT_MARGIN < budget {
+            r.quick_rejects += 1;
+        }
+        if consults < policy::READINESS_QUICK_REJECT_EXIT_MAX_CONSULTS
+            && r.quick_rejects >= policy::READINESS_QUICK_REJECT_EXIT_REJECTS * (consults + 1)
+        {
+            consults += 1;
+            if transport
+                .network()
+                .await
+                .indicates_subnet_conflict(r.trailing_invalid)
+            {
+                r.subnet_conflict = true;
+                return Ok(r);
+            }
+        }
+        let left = deadline.saturating_sub(transport.clock() - start);
+        if left.is_zero() {
+            break;
+        }
+        transport.pause(left.min(policy::READINESS_INTERVAL)).await;
+    }
+    r.subnet_conflict = transport
+        .network()
+        .await
+        .indicates_subnet_conflict(r.trailing_invalid);
+    Ok(r)
+}
+
+/// The readiness budget after a join: a native `joined` keeps the full
+/// budget; a soft failure off the camera subnet gets a quick probe first.
+fn readiness_deadline(
+    join: &Join,
+    snapshot: NetworkSnapshot,
+    model: CameraModel,
+    rejoin: bool,
+) -> Duration {
+    match join {
+        Join::Joined => policy::READINESS_DEADLINE,
+        Join::SoftFailed(_) if !rejoin && !snapshot.on_camera_subnet(model) => {
+            policy::POST_JOIN_QUICK_PROBE
+        }
+        Join::SoftFailed(_) if rejoin && snapshot.route(model) == RouteState::KnownOtherWifi => {
+            policy::POST_JOIN_QUICK_PROBE
+        }
+        Join::SoftFailed(_) => policy::READINESS_DEADLINE,
+    }
+}
+
+async fn join_and_poll<T: ConnectTransport>(
+    transport: &mut T,
+    creds: &WifiCredentials,
+    model: CameraModel,
+    force: bool,
+    rejoin: bool,
+    on_step: &mut impl FnMut(ConnectStep),
+) -> Result<(Join, Duration, Readiness), LinkError> {
+    on_step(ConnectStep::Wifi);
+    transport.wait_foreground().await;
+    let started = transport.clock();
+    let join = transport.join_wifi(creds, force).await?;
+    let elapsed = transport.clock() - started;
+    on_step(ConnectStep::Version);
+    let snapshot = transport.network().await;
+    let deadline = if force {
+        policy::READINESS_DEADLINE
+    } else {
+        readiness_deadline(&join, snapshot, model, rejoin)
+    };
+    let readiness = poll_readiness(transport, deadline).await?;
+    if readiness.subnet_conflict {
+        return Err(LinkError::SubnetConflict);
+    }
+    Ok((join, elapsed, readiness))
+}
+
+/// Silent verify recovery: a slower verify pass before an error shows.
+async fn silent_recovery<T: ConnectTransport>(transport: &mut T) -> bool {
+    for attempt in 0..policy::SILENT_VERIFY_TRIES {
+        if attempt > 0 {
+            transport.pause(policy::SILENT_VERIFY_DELAY).await;
+        }
+        if transport.probe(policy::SILENT_VERIFY_PER_TRY).await == Probe::Reachable {
+            return true;
+        }
+    }
+    false
+}
+
+/// Bluetooth → warm-up → Wi-Fi → readiness → version, reporting each step as
+/// it starts. The caller bounds the whole attempt (`policy::OUTER_TIMEOUT`).
 pub async fn run_connect<T: ConnectTransport>(
     transport: &mut T,
     peripheral_id: &str,
+    options: ConnectOptions,
     mut on_step: impl FnMut(ConnectStep),
-) -> Result<BleSetup, LinkError> {
+) -> Result<ConnectReport, LinkError> {
     on_step(ConnectStep::Bluetooth);
-    let setup = transport.ble_setup(peripheral_id).await?;
-
-    on_step(ConnectStep::Wifi);
-    // A native association failure is not proof the camera is unreachable.
-    // iOS can report a transient error while its route is still settling.
-    match transport.join_wifi(&setup.credentials).await {
-        Ok(()) | Err(LinkError::WifiJoinFailed) => {}
-        Err(error) => return Err(error),
+    if local_network_denied(transport).await {
+        return Err(LinkError::LocalNetworkDenied);
     }
-    transport.wait_status_ready().await?;
+    let setup = ble_stage(transport, peripheral_id).await?;
+    let model = setup.model;
+    let warmup = warmup_delay(
+        options.learned_warmup,
+        model,
+        setup.ap_ready,
+        options.cold_start,
+    );
+    transport.pause(warmup).await;
+
+    let creds = setup.credentials.clone();
+    let (mut join, first_elapsed, mut readiness) =
+        join_and_poll(transport, &creds, model, false, false, &mut on_step).await?;
+    let first_join = match join {
+        Join::Joined => JoinOutcome::Joined,
+        Join::SoftFailed(_) => JoinOutcome::SoftFailed,
+    };
+    let mut joins = 1;
+    let mut reassociated = false;
+
+    // A soft-failed join that the quick probe could not reach joins again.
+    if !readiness.reachable
+        && matches!(join, Join::SoftFailed(_))
+        && readiness.deadline == policy::POST_JOIN_QUICK_PROBE
+        && !transport.network().await.on_camera_subnet(model)
+    {
+        joins += 1;
+        (join, _, readiness) =
+            join_and_poll(transport, &creds, model, false, true, &mut on_step).await?;
+    }
+
+    let mut route = None;
+    if !readiness.reachable {
+        let decision = transport.network().await.route(model);
+        route = Some(decision);
+        // A native `joined` without a usable route: force reassociation. On
+        // GR IV a refused-only poll means another host answers, and a second
+        // system dialog does not recover it.
+        let eligible = join == Join::Joined
+            && joins < policy::MAX_JOINS_PER_ATTEMPT
+            && decision != RouteState::CameraSubnet
+            && !(model == CameraModel::Gr4 && readiness.quick_reject_only());
+        if eligible {
+            joins += 1;
+            reassociated = true;
+            (join, _, readiness) =
+                join_and_poll(transport, &creds, model, true, false, &mut on_step).await?;
+            if !readiness.reachable {
+                route = Some(transport.network().await.route(model));
+            }
+        }
+    }
+
+    if !readiness.reachable {
+        let route = route.unwrap_or(RouteState::Transitioning);
+        let error = match &join {
+            Join::SoftFailed(error) => error.clone(),
+            Join::Joined if route != RouteState::CameraSubnet => LinkError::VerifyNetworkNotReady,
+            Join::Joined if readiness.last_card_not_ready => LinkError::CardNotReady,
+            Join::Joined if !readiness.any_invalid && transport.camera_api_answers().await => {
+                LinkError::NeedsGrkit
+            }
+            Join::Joined => LinkError::VerifyFailed,
+        };
+        let recover =
+            error.is_transient_verify() && route != RouteState::KnownOtherWifi && !reassociated;
+        if !(recover && silent_recovery(transport).await) {
+            // A camera that never answered may be behind a denied permission.
+            if error == LinkError::VerifyFailed && local_network_denied(transport).await {
+                return Err(LinkError::LocalNetworkDenied);
+            }
+            return Err(error);
+        }
+    }
 
     on_step(ConnectStep::Version);
-    transport.read_version(setup.model).await?;
-    Ok(setup)
+    transport.read_version(model).await?;
+    Ok(ConnectReport {
+        setup,
+        first_join,
+        first_join_elapsed: first_elapsed,
+        first_join_verified: joins == 1 && first_join == JoinOutcome::Joined,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::net::Ipv4Addr;
 
-    struct FakeTransport {
-        steps: RefCell<Vec<&'static str>>,
-        fail_at: Option<&'static str>,
+    /// A scripted camera. Time advances only through pauses and probes.
+    struct Script {
+        ble: VecDeque<Result<(), LinkError>>,
+        joins: VecDeque<Result<Join, LinkError>>,
+        /// Probe answers in order; the last one repeats.
+        probes: VecDeque<(Probe, Duration)>,
+        network: NetworkSnapshot,
+        /// The network after a forced reassociation.
+        network_after_force: Option<NetworkSnapshot>,
+        camera_api: bool,
+        access: VecDeque<LocalNetworkAccess>,
+        now: Duration,
+        log: Vec<String>,
     }
 
-    impl ConnectTransport for FakeTransport {
+    fn camera_net() -> NetworkSnapshot {
+        NetworkSnapshot {
+            wifi: true,
+            address: Some(Ipv4Addr::new(192, 168, 0, 5)),
+        }
+    }
+
+    fn home_net() -> NetworkSnapshot {
+        NetworkSnapshot {
+            wifi: true,
+            address: Some(Ipv4Addr::new(10, 0, 0, 7)),
+        }
+    }
+
+    impl Script {
+        fn new() -> Self {
+            Self {
+                ble: VecDeque::new(),
+                joins: VecDeque::from([Ok(Join::Joined)]),
+                probes: VecDeque::from([(Probe::Reachable, Duration::from_millis(50))]),
+                network: camera_net(),
+                network_after_force: None,
+                camera_api: false,
+                access: VecDeque::new(),
+                now: Duration::ZERO,
+                log: Vec::new(),
+            }
+        }
+    }
+
+    impl ConnectTransport for Script {
         fn ble_setup(&mut self, peripheral_id: &str) -> BoxFut<'_, Result<BleSetup, LinkError>> {
             let peripheral_id = peripheral_id.to_owned();
             Box::pin(async move {
-                self.steps.borrow_mut().push("ble");
-                if self.fail_at == Some("ble") {
-                    return Err(LinkError::PairingFailed);
+                self.log.push("ble".into());
+                if let Some(Err(error)) = self.ble.pop_front() {
+                    return Err(error);
                 }
                 Ok(BleSetup {
                     peripheral_id,
@@ -118,46 +509,61 @@ mod tests {
                         ssid: "GR_AP".into(),
                         passphrase: "secret".into(),
                     },
+                    ap_ready: true,
                 })
             })
         }
-
-        fn join_wifi(&mut self, _creds: &WifiCredentials) -> BoxFut<'_, Result<(), LinkError>> {
-            Box::pin(async {
-                self.steps.borrow_mut().push("wifi");
-                if self.fail_at == Some("denied") {
-                    return Err(LinkError::WifiJoinRejected);
+        fn wait_foreground(&mut self) -> BoxFut<'_, ()> {
+            Box::pin(async {})
+        }
+        fn join_wifi(
+            &mut self,
+            _creds: &WifiCredentials,
+            force: bool,
+        ) -> BoxFut<'_, Result<Join, LinkError>> {
+            Box::pin(async move {
+                self.log
+                    .push(if force { "reassociate" } else { "join" }.into());
+                if force && let Some(network) = self.network_after_force {
+                    self.network = network;
                 }
-                if self.fail_at == Some("cancelled") {
-                    return Err(LinkError::Cancelled);
-                }
-                if self.fail_at == Some("wifi") {
-                    Err(LinkError::WifiJoinFailed)
-                } else {
-                    Ok(())
-                }
+                self.joins.pop_front().unwrap_or(Ok(Join::Joined))
             })
         }
-
-        fn wait_status_ready(&mut self) -> BoxFut<'_, Result<(), LinkError>> {
-            Box::pin(async {
-                self.steps.borrow_mut().push("status");
-                if self.fail_at == Some("status") {
-                    Err(LinkError::CardNotReady)
+        fn network(&mut self) -> BoxFut<'_, NetworkSnapshot> {
+            Box::pin(async { self.network })
+        }
+        fn probe(&mut self, timeout: Duration) -> BoxFut<'_, Probe> {
+            Box::pin(async move {
+                let (probe, cost) = if self.probes.len() > 1 {
+                    self.probes.pop_front().unwrap()
                 } else {
-                    Ok(())
-                }
+                    self.probes.front().cloned().unwrap()
+                };
+                self.now += cost.min(timeout);
+                probe
             })
         }
-
+        fn camera_api_answers(&mut self) -> BoxFut<'_, bool> {
+            Box::pin(async { self.camera_api })
+        }
         fn read_version(&mut self, _model: CameraModel) -> BoxFut<'_, Result<(), LinkError>> {
             Box::pin(async {
-                self.steps.borrow_mut().push("version");
-                if self.fail_at == Some("version") {
-                    Err(LinkError::NeedsGrkit)
-                } else {
-                    Ok(())
-                }
+                self.log.push("version".into());
+                Ok(())
+            })
+        }
+        fn pause(&mut self, duration: Duration) -> BoxFut<'_, ()> {
+            Box::pin(async move { self.now += duration })
+        }
+        fn clock(&mut self) -> Duration {
+            self.now
+        }
+        fn local_network_access(&mut self) -> BoxFut<'_, LocalNetworkAccess> {
+            Box::pin(async {
+                self.access
+                    .pop_front()
+                    .unwrap_or(LocalNetworkAccess::Granted)
             })
         }
     }
@@ -165,60 +571,174 @@ mod tests {
     fn block_on<T>(fut: impl Future<Output = T>) -> T {
         use std::task::{Context, Poll, Waker};
         let mut fut = Box::pin(fut);
-        let waker = Waker::noop();
-        let mut cx = Context::from_waker(waker);
+        let mut cx = Context::from_waker(Waker::noop());
         loop {
-            match fut.as_mut().poll(&mut cx) {
-                Poll::Ready(v) => return v,
-                Poll::Pending => {}
+            if let Poll::Ready(v) = fut.as_mut().poll(&mut cx) {
+                return v;
             }
         }
     }
 
-    #[test]
-    fn happy_path_reports_steps_in_order() {
-        let mut t = FakeTransport {
-            steps: RefCell::new(Vec::new()),
-            fail_at: None,
-        };
-        let mut seen = Vec::new();
-        let setup = block_on(run_connect(&mut t, "id-1", |s| seen.push(s))).unwrap();
-        assert_eq!(setup.credentials.ssid, "GR_AP");
-        assert_eq!(
-            seen,
-            [
-                ConnectStep::Bluetooth,
-                ConnectStep::Wifi,
-                ConnectStep::Version
-            ]
-        );
-        assert_eq!(t.steps.into_inner(), ["ble", "wifi", "status", "version"]);
+    fn run(script: &mut Script) -> Result<ConnectReport, LinkError> {
+        block_on(run_connect(script, "id", ConnectOptions::default(), |_| {}))
     }
 
     #[test]
-    fn soft_wifi_failure_still_verifies_http() {
-        let mut t = FakeTransport {
-            steps: RefCell::new(Vec::new()),
-            fail_at: Some("wifi"),
-        };
-        block_on(run_connect(&mut t, "id-1", |_| {})).unwrap();
-        assert_eq!(t.steps.into_inner(), ["ble", "wifi", "status", "version"]);
+    fn happy_path_joins_once_and_verifies() {
+        let mut s = Script::new();
+        let mut steps = Vec::new();
+        let report = block_on(run_connect(
+            &mut s,
+            "id",
+            ConnectOptions::default(),
+            |step| steps.push(step),
+        ))
+        .unwrap();
+        assert!(report.first_join_verified);
+        assert_eq!(s.log, ["ble", "join", "version"]);
+        assert_eq!(
+            steps,
+            [
+                ConnectStep::Bluetooth,
+                ConnectStep::Wifi,
+                ConnectStep::Version,
+                ConnectStep::Version
+            ]
+        );
     }
+
     #[test]
-    fn rejected_or_cancelled_wifi_does_not_probe_http() {
-        for (failure, expected) in [
-            ("denied", LinkError::WifiJoinRejected),
-            ("cancelled", LinkError::Cancelled),
-        ] {
-            let mut transport = FakeTransport {
-                steps: RefCell::new(Vec::new()),
-                fail_at: Some(failure),
-            };
-            assert_eq!(
-                block_on(run_connect(&mut transport, "id", |_| {})),
-                Err(expected)
-            );
-            assert_eq!(transport.steps.into_inner(), ["ble", "wifi"]);
+    fn bluetooth_budgets_follow_the_camera_app() {
+        // One drop is retried; a second asks for pairing.
+        let mut s = Script::new();
+        s.ble = VecDeque::from([Err(LinkError::BleDisconnected)]);
+        run(&mut s).unwrap();
+        let mut s = Script::new();
+        s.ble = VecDeque::from([
+            Err(LinkError::BleDisconnected),
+            Err(LinkError::BleDisconnected),
+        ]);
+        assert_eq!(run(&mut s), Err(LinkError::NotPaired));
+        // Authentication waits out the prompt: six retries, then a failure.
+        let mut s = Script::new();
+        s.ble = (0..7).map(|_| Err(LinkError::BleAuthentication)).collect();
+        assert_eq!(run(&mut s), Err(LinkError::PairingFailed));
+        assert_eq!(s.log.iter().filter(|l| *l == "ble").count(), 7);
+        assert_eq!(s.now, policy::BLE_PAIRING_RETRY_DELAY * 6);
+        // The combined budget is six: alternating reasons stop sooner.
+        let mut s = Script::new();
+        s.ble = VecDeque::from([
+            Err(LinkError::BleDisconnected),
+            Err(LinkError::BleAuthentication),
+            Err(LinkError::BleAuthentication),
+            Err(LinkError::BleAuthentication),
+            Err(LinkError::BleAuthentication),
+            Err(LinkError::BleAuthentication),
+            Err(LinkError::BleAuthentication),
+        ]);
+        assert_eq!(run(&mut s), Err(LinkError::PairingFailed));
+        assert_eq!(s.log.iter().filter(|l| *l == "ble").count(), 7);
+        // A stale pairing and a timeout are not retried.
+        let mut s = Script::new();
+        s.ble = VecDeque::from([Err(LinkError::BlePairingStale)]);
+        assert_eq!(run(&mut s), Err(LinkError::BlePairingStale));
+        assert_eq!(s.log, ["ble"]);
+    }
+
+    #[test]
+    fn soft_failed_join_off_subnet_rejoins_after_a_quick_probe() {
+        let mut s = Script::new();
+        s.joins = VecDeque::from([
+            Ok(Join::SoftFailed(LinkError::WifiJoinFailed)),
+            Ok(Join::Joined),
+        ]);
+        s.network = home_net();
+        s.probes = VecDeque::from([
+            (Probe::Failed, Duration::from_millis(1_500)),
+            (Probe::Failed, Duration::from_millis(1_500)),
+            (Probe::Reachable, Duration::from_millis(40)),
+        ]);
+        run(&mut s).unwrap();
+        assert_eq!(s.log, ["ble", "join", "join", "version"]);
+    }
+
+    #[test]
+    fn joined_without_a_route_forces_reassociation() {
+        let mut s = Script::new();
+        s.network = home_net();
+        s.network_after_force = Some(camera_net());
+        s.probes = (0..11)
+            .map(|_| (Probe::Failed, Duration::from_millis(1_500)))
+            .chain([(Probe::Reachable, Duration::from_millis(40))])
+            .collect();
+        run(&mut s).unwrap();
+        assert_eq!(s.log, ["ble", "join", "reassociate", "version"]);
+    }
+
+    #[test]
+    fn unreachable_camera_on_its_subnet_recovers_silently_or_fails_verify() {
+        // The 15 s poll spends eight probes; the silent pass reaches it.
+        let mut s = Script::new();
+        let mut probes: VecDeque<_> = (0..8)
+            .map(|_| (Probe::Failed, Duration::from_millis(1_500)))
+            .collect();
+        probes.push_back((Probe::Reachable, Duration::from_millis(40)));
+        s.probes = probes;
+        run(&mut s).unwrap();
+        // Never reachable: verify-failed, no reassociation on the camera subnet.
+        let mut s = Script::new();
+        s.probes = VecDeque::from([(Probe::Failed, Duration::from_millis(1_500))]);
+        assert_eq!(run(&mut s), Err(LinkError::VerifyFailed));
+        assert_eq!(s.log, ["ble", "join"]);
+        // The camera API answers but the GRKit service does not.
+        let mut s = Script::new();
+        s.probes = VecDeque::from([(Probe::Failed, Duration::from_millis(1_500))]);
+        s.camera_api = true;
+        assert_eq!(run(&mut s), Err(LinkError::NeedsGrkit));
+    }
+
+    #[test]
+    fn foreign_network_in_the_camera_range_is_a_subnet_conflict() {
+        let mut s = Script::new();
+        s.network = NetworkSnapshot {
+            wifi: true,
+            address: Some(Ipv4Addr::new(192, 168, 0, 40)),
+        };
+        s.probes = VecDeque::from([(Probe::NotCamera, Duration::from_millis(20))]);
+        assert_eq!(run(&mut s), Err(LinkError::SubnetConflict));
+    }
+
+    #[test]
+    fn terminal_join_errors_end_the_attempt() {
+        for error in [LinkError::WifiJoinDenied, LinkError::WifiWrongPassword] {
+            let mut s = Script::new();
+            s.joins = VecDeque::from([Err(error.clone())]);
+            assert_eq!(run(&mut s), Err(error));
+            assert_eq!(s.log, ["ble", "join"]);
         }
+    }
+
+    #[test]
+    fn local_network_access_is_checked_before_and_after() {
+        let mut s = Script::new();
+        s.access = VecDeque::from([LocalNetworkAccess::Denied]);
+        assert_eq!(run(&mut s), Err(LinkError::LocalNetworkDenied));
+        assert!(s.log.is_empty());
+        // Unknown is asked again.
+        let mut s = Script::new();
+        s.access = VecDeque::from([LocalNetworkAccess::Unknown, LocalNetworkAccess::Granted]);
+        run(&mut s).unwrap();
+        // A camera that never answered behind a denied permission.
+        let mut s = Script::new();
+        s.probes = VecDeque::from([(Probe::Failed, Duration::from_millis(1_500))]);
+        s.access = VecDeque::from([LocalNetworkAccess::Granted, LocalNetworkAccess::Denied]);
+        assert_eq!(run(&mut s), Err(LinkError::LocalNetworkDenied));
+    }
+
+    #[test]
+    fn a_still_mounting_card_is_reported() {
+        let mut s = Script::new();
+        s.probes = VecDeque::from([(Probe::CardNotReady, Duration::from_millis(30))]);
+        assert_eq!(run(&mut s), Err(LinkError::CardNotReady));
     }
 }

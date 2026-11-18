@@ -1,4 +1,6 @@
 //! App-owned JNI bridge. Java owns system callbacks; Rust owns connection/update state.
+use crate::domain::connect_policy::NetworkSnapshot;
+use crate::domain::nearby_watch::{Frame, advertised_power};
 use crate::domain::*;
 use async_channel::Sender;
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -29,8 +31,7 @@ static CONFIG: OnceLock<[String; 4]> = OnceLock::new();
 static NEXT: AtomicI64 = AtomicI64::new(1);
 type Reply = oneshot::Sender<Result<Value, String>>;
 static PENDING: Mutex<BTreeMap<i64, Reply>> = Mutex::new(BTreeMap::new());
-static SCANS: Mutex<Option<Sender<Vec<NearbyCamera>>>> = Mutex::new(None);
-static CAMERAS: Mutex<BTreeMap<String, NearbyCamera>> = Mutex::new(BTreeMap::new());
+static SCANS: Mutex<Option<Sender<Frame>>> = Mutex::new(None);
 static DISCONNECTS: Mutex<Option<Sender<String>>> = Mutex::new(None);
 static UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 
@@ -221,19 +222,13 @@ pub extern "system" fn Java_studio_techflow_grkit_CameraBridge_event(
             let Some(model) = adv.model else {
                 return;
             };
-            let camera = NearbyCamera {
-                peripheral_id: id.into(),
-                model,
-                powered_on: adv.shows_powered_on(),
-                rssi: value["rssi"].as_i64().and_then(|v| i32::try_from(v).ok()),
-            };
-            let cameras = {
-                let mut all = lock(&CAMERAS);
-                all.insert(id.into(), camera);
-                all.values().cloned().collect()
-            };
             if let Some(tx) = lock(&SCANS).as_ref() {
-                let _ = tx.try_send(cameras);
+                let _ = tx.try_send(Frame {
+                    peripheral_id: id.into(),
+                    model,
+                    power: advertised_power(adv.powered_on, adv.advertises_camera_information),
+                    rssi: value["rssi"].as_i64().and_then(|v| i32::try_from(v).ok()),
+                });
             }
         }
         _ => {}
@@ -243,28 +238,7 @@ pub extern "system" fn Java_studio_techflow_grkit_CameraBridge_event(
 pub fn bluetooth_unavailable() -> bool {
     UNAVAILABLE.load(Ordering::Relaxed)
 }
-pub fn start_scanning(tx: Sender<Vec<NearbyCamera>>, remembered: Option<&str>) {
-    let known =
-        remembered.and_then(|id| load_remembered().filter(|camera| camera.peripheral_id == id));
-    let cameras = {
-        let mut cameras = lock(&CAMERAS);
-        cameras.clear();
-        // Android can reconnect by a saved address without a fresh advertisement,
-        // including a sleeping camera. Do not infer power or signal strength.
-        if let Some(known) = known {
-            cameras.insert(
-                known.peripheral_id.clone(),
-                NearbyCamera {
-                    peripheral_id: known.peripheral_id,
-                    model: known.model,
-                    powered_on: false,
-                    rssi: None,
-                },
-            );
-        }
-        cameras.values().cloned().collect()
-    };
-    let _ = tx.try_send(cameras);
+pub fn start_scanning(tx: Sender<Frame>, remembered: Option<&str>) {
     *lock(&SCANS) = Some(tx);
     if dispatch(0, "scan", json!({"remembered_id": remembered})).is_err() {
         UNAVAILABLE.store(true, Ordering::Relaxed);
@@ -312,23 +286,47 @@ fn link_error(error: String) -> LinkError {
         "BluetoothUnavailable" => LinkError::BluetoothUnavailable,
         "PairingFailed" => LinkError::PairingFailed,
         "NotPaired" => LinkError::NotPaired,
+        "Disconnected" => LinkError::BleDisconnected,
+        "ConnectFailed" => LinkError::BleConnectFailed,
+        "Timeout" => LinkError::BleTimeout,
+        "Authentication" => LinkError::BleAuthentication,
+        "WifiJoinDenied" => LinkError::WifiJoinDenied,
         "WifiJoinFailed" => LinkError::WifiJoinFailed,
+        "WifiJoinTimeout" => LinkError::WifiJoinTimeout,
         "WifiJoinRejected" => LinkError::WifiJoinRejected,
         _ => LinkError::ConnectionLost,
     }
 }
-struct Attempt(bool);
+/// How a connect attempt ended, told to the Java bridge when it is dropped.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// Dropped before the flow returned: the user cancelled.
+    Cancelled,
+    Failed,
+    Succeeded,
+}
+struct Attempt(Outcome);
 impl Drop for Attempt {
     fn drop(&mut self) {
-        if !self.0 {
-            let _ = dispatch(0, "cancel", json!({}));
-        }
+        let _ = match self.0 {
+            // Resume the scan the attempt paused.
+            Outcome::Succeeded => dispatch(0, "finish", json!({})),
+            // A camera the user cancelled is told to close its access point;
+            // an attempt that ran out of time leaves it as it is.
+            Outcome::Cancelled if !super::connect_deadline_reached() => {
+                dispatch(0, "cancel", json!({"teardown": true}))
+            }
+            Outcome::Cancelled => dispatch(0, "cancel", json!({})),
+            Outcome::Failed => dispatch(0, "cancel", json!({})),
+        };
     }
 }
 type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 struct AndroidTransport {
     model_hint: CameraModel,
+    /// A fresh advertisement says the camera is on: skip the wake write.
+    powered_on: bool,
     package: Option<(CameraStatus, PackageInfo)>,
 }
 
@@ -336,12 +334,14 @@ impl ConnectTransport for AndroidTransport {
     fn ble_setup(&mut self, peripheral_id: &str) -> BoxFut<'_, Result<BleSetup, LinkError>> {
         let id = peripheral_id.to_owned();
         let model = self.model_hint;
+        let powered_on = self.powered_on;
         Box::pin(async move {
             let setup = call(
                 "setup",
-                json!({"id":id,"model":model}),
-                // Includes connection retries and the system pairing prompt.
-                Duration::from_secs(180),
+                json!({"id":id,"model":model,"powered_on":powered_on}),
+                // Includes connection retries and up to two waits for the
+                // system pairing prompt.
+                Duration::from_secs(240),
             )
             .await
             .map_err(link_error)?;
@@ -362,23 +362,46 @@ impl ConnectTransport for AndroidTransport {
                     ssid: ssid.to_owned(),
                     passphrase: passphrase.to_owned(),
                 },
+                ap_ready: setup["ap_ready"].as_bool().unwrap_or(false),
             })
         })
     }
 
-    fn join_wifi(&mut self, credentials: &WifiCredentials) -> BoxFut<'_, Result<(), LinkError>> {
-        let data = json!({"ssid":credentials.ssid,"passphrase":credentials.passphrase});
+    fn wait_foreground(&mut self) -> BoxFut<'_, ()> {
+        // Android joins from the background.
+        Box::pin(async {})
+    }
+
+    fn join_wifi(
+        &mut self,
+        credentials: &WifiCredentials,
+        force: bool,
+    ) -> BoxFut<'_, Result<Join, LinkError>> {
+        let data =
+            json!({"ssid":credentials.ssid,"passphrase":credentials.passphrase,"force":force});
         Box::pin(async move {
             // Permission and network selection each have their own native deadline.
-            call("join", data, Duration::from_secs(130))
+            match call("join", data, Duration::from_secs(130))
                 .await
-                .map(|_| ())
                 .map_err(link_error)
+            {
+                Ok(_) => Ok(Join::Joined),
+                Err(error) if error.is_soft_join_failure() => Ok(Join::SoftFailed(error)),
+                Err(error) => Err(error),
+            }
         })
     }
 
-    fn wait_status_ready(&mut self) -> BoxFut<'_, Result<(), LinkError>> {
-        Box::pin(super::http::wait_until_ready())
+    fn network(&mut self) -> BoxFut<'_, NetworkSnapshot> {
+        Box::pin(async { super::link_support::network_snapshot() })
+    }
+
+    fn probe(&mut self, timeout: Duration) -> BoxFut<'_, Probe> {
+        Box::pin(super::link_support::probe_props(timeout))
+    }
+
+    fn camera_api_answers(&mut self) -> BoxFut<'_, bool> {
+        Box::pin(super::http::camera_api_answers())
     }
 
     fn read_version(&mut self, model: CameraModel) -> BoxFut<'_, Result<(), LinkError>> {
@@ -387,30 +410,70 @@ impl ConnectTransport for AndroidTransport {
             Ok(())
         })
     }
+
+    fn pause(&mut self, duration: Duration) -> BoxFut<'_, ()> {
+        Box::pin(nsh_core::prelude::timer(duration))
+    }
+
+    fn clock(&mut self) -> Duration {
+        super::link_support::foreground_clock()
+    }
+
+    fn local_network_access(&mut self) -> BoxFut<'_, LocalNetworkAccess> {
+        Box::pin(async {
+            // The native request bounds the system dialog itself; a failed
+            // check cannot tell.
+            match call("localNetwork", json!({}), Duration::from_secs(65)).await {
+                Ok(value) if value == "granted" => LocalNetworkAccess::Granted,
+                Ok(value) if value == "denied" => LocalNetworkAccess::Denied,
+                _ => LocalNetworkAccess::Unknown,
+            }
+        })
+    }
 }
 
 pub async fn connect_camera(
     id: &str,
     model: CameraModel,
+    options: ConnectOptions,
     on_step: &mut dyn FnMut(ConnectStep),
-) -> Result<(CameraStatus, PackageInfo, RememberedCamera), LinkError> {
-    let mut attempt = Attempt(false);
+) -> Result<super::Connected, LinkError> {
+    let mut attempt = Attempt(Outcome::Cancelled);
     let mut transport = AndroidTransport {
         model_hint: model,
+        powered_on: options.advertised_powered_on,
         package: None,
     };
-    let setup = run_connect(&mut transport, id, on_step).await?;
-    let (status, package) = transport.package.take().ok_or(LinkError::ConnectionLost)?;
+    let result = run_connect(&mut transport, id, options, on_step)
+        .await
+        .and_then(|report| {
+            let package = transport.package.take().ok_or(LinkError::ConnectionLost)?;
+            Ok((report, package))
+        });
+    attempt.0 = Outcome::Failed;
+    let (report, (status, package)) = result?;
     let remembered = RememberedCamera::new(
-        setup.peripheral_id,
+        report.setup.peripheral_id.clone(),
         status.camera.model,
-        setup.credentials.ssid,
+        report.setup.credentials.ssid.clone(),
     );
     if let Err(error) = save_remembered(&remembered) {
         log::warn!("Could not remember camera: {error}");
     }
-    attempt.0 = true;
-    Ok((status, package, remembered))
+    attempt.0 = Outcome::Succeeded;
+    Ok(super::Connected {
+        status,
+        package,
+        remembered,
+        report: Some(report),
+    })
+}
+
+/// Open this app's details page in Android settings.
+pub async fn open_app_settings() {
+    if let Err(error) = call("settings", json!({}), Duration::from_secs(5)).await {
+        log::warn!("Could not open app settings: {error}");
+    }
 }
 
 pub async fn camera_request(
@@ -421,10 +484,7 @@ pub async fn camera_request(
     headers: &[(&str, String)],
 ) -> Result<nsh_core::element::HttpResponse, String> {
     let mut header_map = serde_json::Map::new();
-    header_map.insert(
-        "Cache-Control".into(),
-        json!("no-cache, no-store"),
-    );
+    header_map.insert("Cache-Control".into(), json!("no-cache, no-store"));
     for (name, value) in headers {
         header_map.insert((*name).into(), json!(value));
     }

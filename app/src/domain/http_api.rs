@@ -192,7 +192,7 @@ pub enum PackageMapError {
     NeedsGrkit,
 }
 
-fn model_from_name(name: &str) -> Option<CameraModel> {
+pub(crate) fn model_from_name(name: &str) -> Option<CameraModel> {
     let upper = name.to_ascii_uppercase();
     if upper.contains("IIIX") || upper.contains("GR3X") {
         Some(CameraModel::Gr3x)

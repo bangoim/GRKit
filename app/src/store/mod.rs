@@ -3,8 +3,10 @@
 //! Reactive fields use NSH `Signal`s so the UI updates when they change.
 
 mod demo_screen;
+mod liveness;
 mod looks;
 mod update;
+mod warmup;
 
 pub use looks::{CatalogItem, ImportDraft, LookPicture, LooksStore, LooksView};
 
@@ -20,10 +22,11 @@ use std::{
 
 use nsh_core::prelude::*;
 
+use crate::domain::nearby_watch::{NearbyWatch, PRUNE_INTERVAL_MS};
 use crate::domain::{
     CameraLink, CameraModel, CameraStatus, ConnectStep, ConnectionState, DemoFail, FakeCamera,
-    LinkError, NearbyCamera, NearbyPromptGate, PackageInfo, RememberedCamera, UpdateError,
-    UpdateKind, UpdatePhase, UpdatePoll, block_on_ready,
+    LinkError, NearbyCamera, PackageInfo, RememberedCamera, UpdateError, UpdateKind, UpdatePhase,
+    UpdatePoll, block_on_ready,
 };
 use crate::platform;
 
@@ -104,11 +107,8 @@ pub struct AppState {
     selected_id: Signal<Option<String>>,
     connect_generation: Signal<u64>,
     connect_abort: Stored<RefCell<Option<futures_util::future::AbortHandle>>>,
-    /// Set when the connected camera disconnects: the next time it advertises
-    /// that it is on, the app connects again by itself, once.
-    reconnect_armed: Signal<bool>,
     /// Suppresses the automatic nearby sheet until the camera powers off.
-    nearby_prompt: Stored<RefCell<NearbyPromptGate>>,
+    nearby_watch: Stored<RefCell<NearbyWatch>>,
     /// The app root's owner. Tasks that must outlive the sheet or page that
     /// starts them (a connect, an update) run under it: a task made with
     /// `spawn` ends with the owner it was made under, and a sheet's owner is
@@ -172,9 +172,8 @@ impl AppState {
             selected_id: signal(None),
             connect_generation: signal(0),
             connect_abort: stored(RefCell::new(None)),
-            reconnect_armed: signal(false),
             root: Owner::current(),
-            nearby_prompt: stored(RefCell::new(NearbyPromptGate::new())),
+            nearby_watch: stored(RefCell::new(NearbyWatch::new())),
         };
         // Development: open a tab at launch, for simulator runs without taps.
         match platform::config_value("GRKIT_START_TAB").as_deref() {
@@ -188,7 +187,7 @@ impl AppState {
         if let Some(screen) = screen {
             demo_screen::apply(app, screen);
         } else if !demo && !platform::has_dev_camera_url() {
-            app.watch_disconnects();
+            app.watch_link();
             app.start_ble_scan();
         } else if !demo {
             app_info!(
@@ -347,130 +346,93 @@ impl AppState {
             .pairing_hint_key()
     }
 
-    /// BLE loss is only a hint: HTTP owns the established Wi-Fi link's health.
-    fn watch_disconnects(self) {
-        let (tx, rx) = async_channel::unbounded();
-        platform::watch_disconnects(tx);
+    /// Watch for powered-on cameras while the app is in the foreground: a
+    /// background scan keeps the radio busy for a prompt nobody can see.
+    fn start_ble_scan(self) {
         spawn(async move {
-            use futures_util::future::{Either, select};
-            let mut failures = 0;
+            let mut scanning = false;
             loop {
-                match select(Box::pin(rx.recv()), Box::pin(timer(Duration::from_secs(5)))).await {
-                    Either::Left((Ok(id), _)) => {
-                        if !self
-                            .remembered
-                            .get()
-                            .is_some_and(|r| r.peripheral_id.eq_ignore_ascii_case(&id))
-                        {
-                            continue;
-                        }
+                let active = lifecycle() == nsh_core::platform::Lifecycle::Active;
+                if active && !scanning {
+                    self.resume_nearby_watch();
+                    scanning = true;
+                } else if !active && scanning {
+                    platform::stop_scanning();
+                    self.nearby_watch.with(|w| w.borrow_mut().clear());
+                    self.nearby.set(Vec::new());
+                    scanning = false;
+                }
+                if scanning {
+                    let changed = self.nearby_watch.with(|w| w.borrow_mut().prune(now_ms()));
+                    if changed {
+                        self.publish_nearby();
                     }
-                    Either::Left((Err(_), _)) => break,
-                    Either::Right(_) => {}
                 }
-                if self.sheet().is_some()
-                    || !matches!(self.flow_phase(), UpdatePhase::Idle)
-                    || !self
-                        .status
-                        .get()
-                        .is_some_and(|s| s.camera.connection == ConnectionState::Connected)
-                {
-                    failures = 0;
-                    continue;
-                }
-                let generation = self.connect_generation.get();
-                let reachable = platform::http::service_reachable().await;
-                // A connect, cancel, or update may have started during the request.
-                if self.connect_generation.get() != generation || self.sheet().is_some() {
-                    failures = 0;
-                    continue;
-                }
-                failures = if reachable { 0 } else { failures + 1 };
-                if failures < 2 {
-                    continue;
-                }
-                if let Some(mut status) = self.status.get() {
-                    status.camera.connection = ConnectionState::Disconnected;
-                    self.status.set(Some(status));
-                    self.reconnect_armed.set(true);
-                }
-                failures = 0;
+                timer(Duration::from_millis(PRUNE_INTERVAL_MS)).await;
             }
         });
     }
 
-    /// Connects again when the camera that disconnected advertises that it
-    /// is on. Returns whether it started a connect.
-    fn try_reconnect(self, list: &[NearbyCamera]) -> bool {
-        if !self.reconnect_armed.get() || self.sheet().is_some() {
-            return false;
-        }
-        let Some(remembered) = self.remembered.get() else {
-            return false;
-        };
-        let back = list.iter().any(|c| {
-            c.peripheral_id
-                .eq_ignore_ascii_case(&remembered.peripheral_id)
-                && c.powered_on
-        });
-        if !back {
-            return false;
-        }
-        app_info!("camera is on again; reconnecting");
-        self.reconnect_armed.set(false);
-        self.selected_id.set(Some(remembered.peripheral_id));
-        self.start_connect();
-        true
-    }
-
-    fn start_ble_scan(self) {
+    fn resume_nearby_watch(self) {
         let (tx, rx) = async_channel::unbounded();
         let remembered_id = self.remembered.get().map(|r| r.peripheral_id.clone());
         platform::start_scanning(tx, remembered_id.as_deref());
         spawn(async move {
-            while let Ok(list) = rx.recv().await {
-                self.nearby.set(list.clone());
-                self.nearby_prompt
-                    .with(|gate| gate.borrow_mut().observe(&list));
-                if self.try_reconnect(&list) {
-                    continue;
+            while let Ok(frame) = rx.recv().await {
+                if frame.power == crate::domain::nearby_watch::AdvertisedPower::Standby {
+                    self.camera_powered_off(&frame.peripheral_id);
                 }
-                // Suppress a dismissed camera until an observed power cycle.
-                if self.sheet().is_some() || self.status().is_some() {
-                    continue;
-                }
-                let remembered = self.remembered.get();
-                let candidate = self.nearby_prompt.with(|gate| {
-                    gate.borrow().candidate(
-                        &list,
-                        remembered
-                            .as_ref()
-                            .map(|camera| camera.peripheral_id.as_str()),
-                    )
-                });
-                let Some(cam) = candidate else {
-                    continue;
-                };
-                let allow = self
-                    .nearby_prompt
-                    .with(|gate| gate.borrow().should_auto_show(&cam.peripheral_id));
-                if allow {
-                    self.selected_id.set(Some(cam.peripheral_id));
-                    self.set_sheet(Some(Sheet::Nearby));
+                let changed = self
+                    .nearby_watch
+                    .with(|w| w.borrow_mut().frame(&frame, now_ms()));
+                if changed {
+                    self.publish_nearby();
                 }
             }
         });
     }
 
-    /// Close the nearby sheet and suppress it until an observed power cycle.
+    /// Show the sightings and offer the nearby prompt once per power-on.
+    fn publish_nearby(self) {
+        let list = self.nearby_watch.with(|w| w.borrow().sightings().to_vec());
+        self.nearby.set(list);
+        if self.sheet().is_some() || self.status().is_some() {
+            return;
+        }
+        let remembered = self.remembered.get().map(|r| r.peripheral_id);
+        let candidate = self
+            .nearby_watch
+            .with(|w| w.borrow().candidate(remembered.as_deref()));
+        if let Some(camera) = candidate {
+            self.suppress_nearby(&camera.peripheral_id);
+            self.selected_id.set(Some(camera.peripheral_id));
+            self.set_sheet(Some(Sheet::Nearby));
+        }
+    }
+
+    /// Keep a camera out of the nearby prompt for its current power-on.
+    pub(super) fn suppress_nearby(self, peripheral_id: &str) {
+        self.nearby_watch
+            .with(|w| w.borrow_mut().suppress(peripheral_id, now_ms()));
+    }
+
+    /// Whether a fresh advertisement says this camera is on.
+    fn advertised_powered_on(self, peripheral_id: &str) -> bool {
+        self.nearby_watch.with(|w| {
+            w.borrow()
+                .sightings()
+                .iter()
+                .any(|c| c.peripheral_id.eq_ignore_ascii_case(peripheral_id))
+        })
+    }
+
     pub fn dismiss_nearby(self) {
         if let Some(id) = self.selected_id.get().or_else(|| {
             self.nearby_cameras()
                 .first()
                 .map(|c| c.peripheral_id.clone())
         }) {
-            self.nearby_prompt
-                .with(|gate| gate.borrow_mut().dismiss(&id));
+            self.suppress_nearby(&id);
         }
         self.set_sheet(None);
     }
@@ -548,16 +510,41 @@ impl AppState {
         self.root.run(|| {
             spawn(async move {
                 app_info!("connect task started");
-                let operation = platform::connect_camera(&peripheral_id, model_hint, |step| {
-                    if self.connect_generation.get() != generation {
-                        return;
+                platform::begin_connect_attempt();
+                let options = crate::domain::ConnectOptions {
+                    advertised_powered_on: self.advertised_powered_on(&peripheral_id),
+                    ..warmup::options_for(&peripheral_id)
+                };
+                let last_step = std::rc::Rc::new(std::cell::Cell::new(ConnectStep::Bluetooth));
+                let step_seen = last_step.clone();
+                let operation =
+                    platform::connect_camera(&peripheral_id, model_hint, options, |step| {
+                        step_seen.set(step);
+                        if self.connect_generation.get() != generation {
+                            return;
+                        }
+                        if !self.initial_connect.get() {
+                            self.sheet
+                                .set(Some(Sheet::Connecting { step: step.as_u8() }));
+                        }
+                    });
+                // One attempt is bounded by foreground time; the step it was
+                // on when time ran out names the timeout.
+                let bounded = async {
+                    use futures_util::future::{Either, select};
+                    match select(Box::pin(operation), Box::pin(connect_deadline())).await {
+                        Either::Left((result, _)) => result,
+                        Either::Right((_, operation)) => {
+                            platform::mark_connect_deadline();
+                            drop(operation);
+                            Err(match last_step.get() {
+                                ConnectStep::Wifi => LinkError::WifiJoinTimeout,
+                                _ => LinkError::BleTimeout,
+                            })
+                        }
                     }
-                    if !self.initial_connect.get() {
-                        self.sheet
-                            .set(Some(Sheet::Connecting { step: step.as_u8() }));
-                    }
-                });
-                let result = futures_util::future::Abortable::new(operation, registration).await;
+                };
+                let result = futures_util::future::Abortable::new(bounded, registration).await;
                 if self.connect_generation.get() != generation {
                     self.connect_abort.with(|slot| slot.borrow_mut().take());
                     return;
@@ -566,7 +553,17 @@ impl AppState {
                 let result = result.unwrap_or(Err(LinkError::Cancelled));
                 self.initial_connect.set(false);
                 match result {
-                    Ok((status, package, remembered)) => {
+                    Ok(platform::Connected {
+                        status,
+                        package,
+                        remembered,
+                        report,
+                    }) => {
+                        if let Some(report) = &report {
+                            warmup::learn(&peripheral_id, status.camera.model, options, report);
+                        }
+                        // A camera just connected to is not offered again.
+                        self.suppress_nearby(&peripheral_id);
                         self.reset_looks();
                         self.status.set(Some(status));
                         self.package.set(Some(package));
@@ -598,7 +595,6 @@ impl AppState {
         self.connect_generation
             .update(|generation| *generation = generation.wrapping_add(1));
         self.connect_started.set(None);
-        self.reconnect_armed.set(false);
         self.connect_abort.with(|slot| {
             if let Some(abort) = slot.borrow().as_ref() {
                 abort.abort();
@@ -911,6 +907,26 @@ fn demo_fail_from_env() -> DemoFail {
     }
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Resolves after `connect_policy::OUTER_TIMEOUT` of foreground time.
+async fn connect_deadline() {
+    let start = platform::link_support::foreground_clock();
+    loop {
+        timer(Duration::from_millis(250)).await;
+        if platform::link_support::foreground_clock() - start
+            >= crate::domain::connect_policy::OUTER_TIMEOUT
+        {
+            return;
+        }
+    }
+}
+
 /// Connected and up to date?
 pub fn is_up_to_date(package: &PackageInfo) -> bool {
     package
@@ -926,32 +942,13 @@ pub fn rate_url() -> String {
 
 /// User-facing copy for a connect-time link error.
 pub fn link_error_title(error: &LinkError) -> String {
-    use crate::strings::tr;
-    match error {
-        LinkError::NeedsGrkit => tr("error.old_title", &[]),
-        LinkError::PairingFailed | LinkError::NotPaired => tr("error.pair_title", &[]),
-        LinkError::WifiJoinFailed | LinkError::WifiJoinRejected => tr("error.wifi_title", &[]),
-        LinkError::CardNotReady => tr("error.card_ready_title", &[]),
-        LinkError::BluetoothUnavailable => tr("error.bt_title", &[]),
-        _ => tr("error.lost_title", &[]),
-    }
+    crate::strings::tr(error.copy().0, &[])
 }
 
 pub fn link_error_body(error: &LinkError) -> String {
     use crate::strings::tr;
     match error {
-        LinkError::NeedsGrkit => tr("error.old_body", &[]),
-        LinkError::PairingFailed | LinkError::NotPaired => tr("error.pair_body", &[]),
-        LinkError::WifiJoinFailed | LinkError::WifiJoinRejected => tr("error.wifi_body", &[]),
-        LinkError::CardNotReady => tr("error.card_ready_body", &[]),
-        LinkError::BluetoothUnavailable => tr("error.bt_body", &[]),
-        LinkError::Http(msg) => msg.clone(),
-        _ => tr("error.lost_body", &[]),
+        LinkError::Http(msg) => format!("{} {msg}", tr(error.copy().1, &[])),
+        _ => tr(error.copy().1, &[]),
     }
-}
-
-// Silence unused import in non-connect paths.
-#[allow(dead_code)]
-fn _connect_step_used() -> ConnectStep {
-    ConnectStep::Bluetooth
 }

@@ -1,5 +1,6 @@
 //! CoreBluetooth central: scan, connect, GATT queue for wake and Wi-Fi credentials.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -21,13 +22,14 @@ use objc2_foundation::{
     NSArray, NSData, NSDictionary, NSError, NSNumber, NSObject, NSObjectProtocol, NSString, NSUUID,
 };
 
+use crate::domain::nearby_watch::{Frame, advertised_power};
 use crate::domain::uuids::{
     BLUETOOTH_CONTROL_SERVICE, CAMERA_INFORMATION_SERVICE, CAMERA_POWER, CAMERA_SERVICE,
     NETWORK_TYPE, PASSPHRASE, SSID, WLAN_CONTROL_SERVICE,
 };
 use crate::domain::{
     ApReadyLatch, BleSetup, CameraModel, LinkError, NearbyCamera, WifiCredentials, decode_cred,
-    is_supported_camera, matches_operation, parse_advertisement, timing,
+    is_ble_pairing_error, is_supported_camera, matches_operation, parse_advertisement, timing,
 };
 
 /// ObjC objects touched only on the main queue; marked Send for storage.
@@ -42,7 +44,7 @@ enum BleEvent {
     Connected(String),
     ConnectFailed {
         peripheral_id: String,
-        pairing: bool,
+        fault: BleFault,
     },
     Disconnected(String),
     ServicesReady(String),
@@ -66,14 +68,52 @@ enum BleEvent {
     Error {
         peripheral_id: String,
         characteristic: Option<String>,
-        pairing: bool,
+        fault: BleFault,
     },
+}
+
+/// What a native Bluetooth failure means for the connect flow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BleFault {
+    /// Insufficient authentication or encryption: the system pairing has
+    /// not completed yet.
+    Authentication,
+    /// The camera removed this phone's pairing (CoreBluetooth error 14).
+    PairingStale,
+    /// A required service or characteristic is missing: the camera does not
+    /// expose them before it is paired.
+    Missing,
+    /// Any other native failure.
+    Failed,
+}
+
+impl BleFault {
+    fn of(error: &NSError) -> Self {
+        // NSError descriptions are localized; the domains keep ATT and CB codes distinct.
+        let domain = error.domain().to_string();
+        if !is_ble_pairing_error(&domain, error.code()) {
+            BleFault::Failed
+        } else if domain == "CBErrorDomain" {
+            BleFault::PairingStale
+        } else {
+            BleFault::Authentication
+        }
+    }
+
+    fn link_error(self) -> LinkError {
+        match self {
+            BleFault::Authentication => LinkError::BleAuthentication,
+            BleFault::PairingStale => LinkError::BlePairingStale,
+            BleFault::Missing => LinkError::NotPaired,
+            BleFault::Failed => LinkError::BleConnectFailed,
+        }
+    }
 }
 
 struct Shared {
     peripherals: Mutex<HashMap<String, MainObj<CBPeripheral>>>,
     nearby: Mutex<HashMap<String, NearbyCamera>>,
-    nearby_tx: Mutex<Option<async_channel::Sender<Vec<NearbyCamera>>>>,
+    nearby_tx: Mutex<Option<async_channel::Sender<Frame>>>,
     /// Hears the id of each peripheral that disconnects (`watch_disconnects`).
     disconnect_tx: Mutex<Option<async_channel::Sender<String>>>,
 }
@@ -210,30 +250,35 @@ define_class!(
             let Some(model) = adv.model else {
                 return;
             };
+            let rssi = (rssi.intValue() != 127).then(|| rssi.intValue());
             let nearby = NearbyCamera {
                 peripheral_id: id.clone(),
                 model,
                 powered_on: adv.shows_powered_on(),
-                rssi: (rssi.intValue() != 127).then(|| rssi.intValue()),
+                rssi,
             };
             shared()
                 .peripherals
                 .lock()
                 .unwrap()
                 .insert(id.clone(), MainObj(peripheral.retain()));
-            let changed = {
-                let mut cameras = shared().nearby.lock().unwrap();
-                let changed = cameras.get(&id).is_none_or(|previous| {
-                    previous.model != nearby.model
-                        || previous.powered_on != nearby.powered_on
-                        || previous.rssi != nearby.rssi
-                });
-                cameras.insert(id.clone(), nearby);
-                changed
-            };
-            if changed {
-                publish_nearby();
+            let first = shared()
+                .nearby
+                .lock()
+                .unwrap()
+                .insert(id.clone(), nearby)
+                .is_none();
+            if first {
                 app_info!("BLE discovered camera {}", short_id(&id));
+            }
+            // Every frame goes to the nearby watch, which owns freshness.
+            if let Some(tx) = shared().nearby_tx.lock().unwrap().as_ref() {
+                let _ = tx.try_send(Frame {
+                    peripheral_id: id,
+                    model,
+                    power: advertised_power(adv.powered_on, adv.advertises_camera_information),
+                    rssi,
+                });
             }
         }
 
@@ -261,7 +306,7 @@ define_class!(
             log::warn!("BLE connect failed {}: {message}", short_id(&id));
             emit(BleEvent::ConnectFailed {
                 peripheral_id: id,
-                pairing: error.is_some_and(is_pairing_error),
+                fault: error.map_or(BleFault::Failed, BleFault::of),
             });
         }
 
@@ -373,25 +418,25 @@ define_class!(
     }
 );
 
-fn is_pairing_error(error: &NSError) -> bool {
-    // NSError descriptions are localized; the domains keep ATT and CB codes distinct.
-    crate::domain::is_ble_pairing_error(&error.domain().to_string(), error.code())
-}
-
 fn emit_native_gatt_error(peripheral_id: &str, characteristic: Option<&str>, error: &NSError) {
     emit_ble_error(
         peripheral_id,
         characteristic,
         &error.localizedDescription().to_string(),
-        is_pairing_error(error),
+        BleFault::of(error),
     );
 }
 
-fn emit_gatt_error(peripheral_id: &str, characteristic: Option<&str>, message: &str) {
-    emit_ble_error(peripheral_id, characteristic, message, false);
+fn emit_missing(peripheral_id: &str, characteristic: Option<&str>, message: &str) {
+    emit_ble_error(peripheral_id, characteristic, message, BleFault::Missing);
 }
 
-fn emit_ble_error(peripheral_id: &str, characteristic: Option<&str>, message: &str, pairing: bool) {
+fn emit_ble_error(
+    peripheral_id: &str,
+    characteristic: Option<&str>,
+    message: &str,
+    fault: BleFault,
+) {
     log::warn!(
         "BLE GATT error {}{}: {message}",
         short_id(peripheral_id),
@@ -400,7 +445,7 @@ fn emit_ble_error(peripheral_id: &str, characteristic: Option<&str>, message: &s
     emit(BleEvent::Error {
         peripheral_id: peripheral_id.to_owned(),
         characteristic: characteristic.map(str::to_owned),
-        pairing,
+        fault,
     });
 }
 
@@ -438,13 +483,6 @@ fn parse_adv_dict(
             .unwrap_or_default()
     };
     (manufacturer, services)
-}
-
-fn publish_nearby() {
-    if let Some(tx) = shared().nearby_tx.lock().unwrap().as_ref() {
-        let list: Vec<_> = shared().nearby.lock().unwrap().values().cloned().collect();
-        let _ = tx.try_send(list);
-    }
 }
 
 fn ensure_central() {
@@ -489,7 +527,7 @@ fn stop_radio_scan() {
 
 /// Start scanning and publish nearby camera snapshots on `tx`.
 /// Optionally primes a remembered peripheral via retrieve (not “nearby” until it advertises).
-pub fn start_scanning(tx: async_channel::Sender<Vec<NearbyCamera>>, remembered_id: Option<&str>) {
+pub fn start_scanning(tx: async_channel::Sender<Frame>, remembered_id: Option<&str>) {
     *shared().nearby_tx.lock().unwrap() = Some(tx);
     SCAN_WANTED.store(true, Ordering::SeqCst);
     let remembered = remembered_id.map(str::to_owned);
@@ -569,14 +607,20 @@ pub fn stop_scanning() {
     stop_radio_scan();
 }
 
-/// Connect, wake, start AP, and read Wi-Fi credentials.
+/// Connect, wake, start AP, and read Wi-Fi credentials. `connected` is set
+/// once the Bluetooth link is up, so a cancelled attempt knows to close the
+/// access point.
+/// `powered_on` comes from a fresh advertisement: only then is the wake
+/// write skipped.
 pub async fn ble_setup(
     peripheral_id: &str,
     model_hint: CameraModel,
+    powered_on: bool,
+    connected: &Cell<bool>,
 ) -> Result<BleSetup, LinkError> {
     app_info!("BLE setup start {}", short_id(peripheral_id));
     let mut rx = install_event_receiver(peripheral_id);
-    let result = ble_setup_inner(peripheral_id, model_hint, &mut rx).await;
+    let result = ble_setup_inner(peripheral_id, model_hint, powered_on, connected, &mut rx).await;
     rx.succeeded = result.is_ok();
     match &result {
         Ok(_) => app_info!("BLE setup ok {}", short_id(peripheral_id)),
@@ -588,6 +632,8 @@ pub async fn ble_setup(
 async fn ble_setup_inner(
     peripheral_id: &str,
     model_hint: CameraModel,
+    powered_on_already: bool,
+    connected: &Cell<bool>,
     rx: &mut BleReceiver,
 ) -> Result<BleSetup, LinkError> {
     ensure_central_async(rx).await?;
@@ -595,13 +641,6 @@ async fn ble_setup_inner(
     pause_scanning();
     timer(timing::SCAN_CONNECT_SETTLE).await;
 
-    let powered_on_already = shared()
-        .nearby
-        .lock()
-        .unwrap()
-        .get(peripheral_id)
-        .map(|n| n.powered_on)
-        .unwrap_or(false);
     let model = shared()
         .nearby
         .lock()
@@ -610,12 +649,17 @@ async fn ble_setup_inner(
         .map(|n| n.model)
         .unwrap_or(model_hint);
 
-    connect_with_retries(peripheral_id, rx).await?;
-    discover_all(peripheral_id, rx).await?;
+    connect_with_retries(peripheral_id, timing::BLE_CONNECT_TIMEOUT_RETRIES, rx).await?;
+    connected.set(true);
 
     app_info!("BLE reading Wi-Fi credentials {}", short_id(peripheral_id));
-    let ssid = gatt_read(peripheral_id, SSID, rx).await?;
-    let passphrase = gatt_read(peripheral_id, PASSPHRASE, rx).await?;
+    let ssid = decode_cred(&gatt_read(peripheral_id, SSID, rx).await?);
+    let passphrase = decode_cred(&gatt_read(peripheral_id, PASSPHRASE, rx).await?);
+    if ssid.is_empty() || passphrase.is_empty() {
+        // The camera hides its network until this phone is paired.
+        log::warn!("BLE Wi-Fi credentials empty {}", short_id(peripheral_id));
+        return Err(LinkError::NotPaired);
+    }
 
     if !powered_on_already {
         app_info!("BLE waking camera {}", short_id(peripheral_id));
@@ -665,22 +709,13 @@ async fn ble_setup_inner(
             }
         });
     });
-    // GR Snap adds a cold-start buffer when the camera misses AP readiness.
-    let missed_notification_delay = if ap_ready {
-        Duration::ZERO
-    } else {
-        Duration::from_millis(1_500)
-    };
-    timer(timing::ap_warmup(model) + missed_notification_delay).await;
-
+    // The shared flow waits out the learned access point warm-up.
     Ok(BleSetup {
         peripheral_id: peripheral_id.to_owned(),
         model,
         powered_on_already,
-        credentials: WifiCredentials {
-            ssid: decode_cred(&ssid),
-            passphrase: decode_cred(&passphrase),
-        },
+        credentials: WifiCredentials { ssid, passphrase },
+        ap_ready,
     })
 }
 
@@ -708,26 +743,46 @@ async fn ensure_central_async(rx: &mut BleReceiver) -> Result<(), LinkError> {
     }
 }
 
-async fn connect_with_retries(peripheral_id: &str, rx: &mut BleReceiver) -> Result<(), LinkError> {
-    for attempt in 0..timing::BLE_CONNECT_ATTEMPTS {
-        match connect_once(peripheral_id, rx).await {
+/// Connect and discover services. A failed connect or an incomplete
+/// authentication is retried up to `BLE_CONNECT_ATTEMPTS` times; a connect
+/// timeout only `timeout_retries` times. Other errors end at once.
+async fn connect_with_retries(
+    peripheral_id: &str,
+    timeout_retries: u32,
+    rx: &mut BleReceiver,
+) -> Result<(), LinkError> {
+    let mut timeouts = 0;
+    let mut attempt = 1;
+    loop {
+        let result = match connect_once(peripheral_id, rx).await {
+            Ok(()) => discover_all(peripheral_id, rx).await,
+            Err(error) => Err(error),
+        };
+        let error = match result {
             Ok(()) => return Ok(()),
-            Err(
-                e @ (LinkError::ConnectionLost | LinkError::PairingFailed | LinkError::NotPaired),
-            ) if attempt + 1 < timing::BLE_CONNECT_ATTEMPTS => {
-                log::warn!(
-                    "BLE connect attempt {} failed {}: {e:?}",
-                    attempt + 1,
-                    short_id(peripheral_id)
-                );
-                cancel_connection(peripheral_id);
-                timer(timing::BLE_CONNECT_RETRY_DELAY).await;
-                while rx.events.try_recv().is_ok() {}
-            }
-            Err(e) => return Err(e),
+            Err(error) => error,
+        };
+        let timeout_retry = error == LinkError::BleTimeout && timeouts < timeout_retries;
+        let retryable = matches!(
+            error,
+            LinkError::BleAuthentication | LinkError::BleConnectFailed
+        );
+        if !(retryable || timeout_retry) || attempt == timing::BLE_CONNECT_ATTEMPTS {
+            return Err(error);
         }
+        if timeout_retry {
+            timeouts += 1;
+        }
+        log::warn!(
+            "BLE connect attempt {attempt} failed {}: {error:?}",
+            short_id(peripheral_id)
+        );
+        // A pending connection left in CoreBluetooth would race the retry.
+        cancel_connection(peripheral_id);
+        timer(timing::BLE_CONNECT_RETRY_DELAY).await;
+        while rx.events.try_recv().is_ok() {}
+        attempt += 1;
     }
-    Err(LinkError::ConnectionLost)
 }
 
 async fn connect_once(peripheral_id: &str, rx: &mut BleReceiver) -> Result<(), LinkError> {
@@ -760,7 +815,7 @@ async fn connect_once(peripheral_id: &str, rx: &mut BleReceiver) -> Result<(), L
         } else if unsafe { peripheral.state() } == CBPeripheralState::Disconnecting {
             emit(BleEvent::ConnectFailed {
                 peripheral_id: id_for_main.clone(),
-                pairing: false,
+                fault: BleFault::Failed,
             });
         } else {
             unsafe { central.connectPeripheral_options(peripheral, None) };
@@ -772,33 +827,22 @@ async fn connect_once(peripheral_id: &str, rx: &mut BleReceiver) -> Result<(), L
             Some(BleEvent::Connected(cid)) if cid.eq_ignore_ascii_case(&id) => return Ok(()),
             Some(BleEvent::ConnectFailed {
                 peripheral_id: cid,
-                pairing,
-                ..
-            }) if cid.eq_ignore_ascii_case(&id) => {
-                if pairing {
-                    return Err(LinkError::PairingFailed);
-                }
-                return Err(LinkError::ConnectionLost);
-            }
+                fault,
+            }) if cid.eq_ignore_ascii_case(&id) => return Err(fault.link_error()),
+            // Not connected yet: a drop here is a failed connect.
             Some(BleEvent::Disconnected(cid)) if cid.eq_ignore_ascii_case(&id) => {
-                return Err(LinkError::ConnectionLost);
+                return Err(LinkError::BleConnectFailed);
             }
             Some(BleEvent::Error {
                 peripheral_id: cid,
-                pairing,
+                fault,
                 ..
-            }) if cid.eq_ignore_ascii_case(&id) => {
-                return Err(if pairing {
-                    LinkError::PairingFailed
-                } else {
-                    LinkError::ConnectionLost
-                });
-            }
+            }) if cid.eq_ignore_ascii_case(&id) => return Err(fault.link_error()),
             _ => {}
         }
     }
     cancel_connection(peripheral_id);
-    Err(LinkError::ConnectionLost)
+    Err(LinkError::BleTimeout)
 }
 
 async fn discover_all(peripheral_id: &str, rx: &mut BleReceiver) -> Result<(), LinkError> {
@@ -831,7 +875,7 @@ async fn discover_all(peripheral_id: &str, rx: &mut BleReceiver) -> Result<(), L
                         return;
                     }
                 }
-                emit_gatt_error(&id, None, "missing required service");
+                emit_missing(&id, None, "missing required service");
             });
         });
         wait_for(rx, peripheral_id, None, timing::GATT_TIMEOUT, |e| {
@@ -879,7 +923,7 @@ async fn gatt_read(
             if let Some(ch) = find_characteristic(peripheral, &char_uuid_owned) {
                 unsafe { peripheral.readValueForCharacteristic(&ch) };
             } else {
-                emit_gatt_error(&id, Some(&char_uuid_owned), "missing characteristic");
+                emit_missing(&id, Some(&char_uuid_owned), "missing characteristic");
             }
         });
     });
@@ -889,7 +933,7 @@ async fn gatt_read(
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
-            return Err(LinkError::ConnectionLost);
+            return Err(LinkError::BleTimeout);
         }
         match recv_timeout(rx, remaining).await {
             Some(BleEvent::Value {
@@ -900,19 +944,14 @@ async fn gatt_read(
                 return Ok(data);
             }
             Some(BleEvent::Disconnected(cid)) if cid.eq_ignore_ascii_case(&id) => {
-                return Err(LinkError::ConnectionLost);
+                return Err(LinkError::BleDisconnected);
             }
             Some(BleEvent::Error {
                 peripheral_id: pid,
                 characteristic,
-                pairing,
-                ..
+                fault,
             }) if matches_operation(&pid, characteristic.as_deref(), &id, Some(&char_uuid)) => {
-                return Err(if pairing {
-                    LinkError::NotPaired
-                } else {
-                    LinkError::ConnectionLost
-                });
+                return Err(fault.link_error());
             }
             None => return Err(LinkError::ConnectionLost),
             _ => {}
@@ -941,7 +980,7 @@ async fn gatt_write(
                     );
                 }
             } else {
-                emit_gatt_error(&id, Some(&char_uuid_owned), "missing characteristic");
+                emit_missing(&id, Some(&char_uuid_owned), "missing characteristic");
             }
         });
     });
@@ -951,7 +990,7 @@ async fn gatt_write(
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
-            return Err(LinkError::ConnectionLost);
+            return Err(LinkError::BleTimeout);
         }
         match recv_timeout(rx, remaining).await {
             Some(BleEvent::Written {
@@ -961,19 +1000,14 @@ async fn gatt_write(
                 return Ok(());
             }
             Some(BleEvent::Disconnected(cid)) if cid.eq_ignore_ascii_case(&id) => {
-                return Err(LinkError::ConnectionLost);
+                return Err(LinkError::BleDisconnected);
             }
             Some(BleEvent::Error {
                 peripheral_id: pid,
                 characteristic,
-                pairing,
-                ..
+                fault,
             }) if matches_operation(&pid, characteristic.as_deref(), &id, Some(&char_uuid)) => {
-                return Err(if pairing {
-                    LinkError::NotPaired
-                } else {
-                    LinkError::ConnectionLost
-                });
+                return Err(fault.link_error());
             }
             None => return Err(LinkError::ConnectionLost),
             _ => {}
@@ -993,7 +1027,7 @@ async fn gatt_subscribe(
             if let Some(ch) = find_characteristic(peripheral, &char_uuid_owned) {
                 unsafe { peripheral.setNotifyValue_forCharacteristic(true, &ch) };
             } else {
-                emit_gatt_error(&id, Some(&char_uuid_owned), "missing characteristic");
+                emit_missing(&id, Some(&char_uuid_owned), "missing characteristic");
             }
         });
     });
@@ -1003,7 +1037,7 @@ async fn gatt_subscribe(
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
-            return Err(LinkError::ConnectionLost);
+            return Err(LinkError::BleTimeout);
         }
         match recv_timeout(rx, remaining).await {
             Some(BleEvent::NotifyReady {
@@ -1013,14 +1047,14 @@ async fn gatt_subscribe(
                 return Ok(());
             }
             Some(BleEvent::Disconnected(cid)) if cid.eq_ignore_ascii_case(&id) => {
-                return Err(LinkError::ConnectionLost);
+                return Err(LinkError::BleDisconnected);
             }
             Some(BleEvent::Error {
                 peripheral_id: pid,
                 characteristic,
-                ..
+                fault,
             }) if matches_operation(&pid, characteristic.as_deref(), &id, Some(&char_uuid)) => {
-                return Err(LinkError::ConnectionLost);
+                return Err(fault.link_error());
             }
             None => return Err(LinkError::ConnectionLost),
             _ => {}
@@ -1053,7 +1087,7 @@ async fn wait_notify_value(
                 return Ok(true);
             }
             Some(BleEvent::Disconnected(cid)) if cid.eq_ignore_ascii_case(&id) => {
-                return Err(LinkError::ConnectionLost);
+                return Err(LinkError::BleDisconnected);
             }
             _ => {}
         }
@@ -1101,24 +1135,19 @@ async fn wait_for(
         match recv_timeout(rx, Duration::from_millis(100)).await {
             Some(e) if pred(&e) => return Ok(()),
             Some(BleEvent::Disconnected(cid)) if cid.eq_ignore_ascii_case(peripheral_id) => {
-                return Err(LinkError::ConnectionLost);
+                return Err(LinkError::BleDisconnected);
             }
             Some(BleEvent::Error {
                 peripheral_id: pid,
                 characteristic: ch,
-                pairing,
-                ..
+                fault,
             }) if matches_operation(&pid, ch.as_deref(), peripheral_id, characteristic) => {
-                return Err(if pairing {
-                    LinkError::PairingFailed
-                } else {
-                    LinkError::ConnectionLost
-                });
+                return Err(fault.link_error());
             }
             _ => {}
         }
     }
-    Err(LinkError::ConnectionLost)
+    Err(LinkError::BleTimeout)
 }
 
 async fn recv_timeout(rx: &mut BleReceiver, timeout: Duration) -> Option<BleEvent> {
@@ -1141,6 +1170,68 @@ async fn recv_timeout(rx: &mut BleReceiver, timeout: Duration) -> Option<BleEven
         }
         _ => None,
     }
+}
+
+/// Taking the link back for one write on a camera that is already on.
+const TEARDOWN_RECONNECT_TIMEOUT: Duration = Duration::from_secs(6);
+/// One teardown command; a wedged CoreBluetooth call must not hold it.
+const TEARDOWN_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// After the user cancels a connect: turn the camera access point off
+/// (Network Type 0x00), then drop the Bluetooth link. The link is taken
+/// back when it already dropped. Each step is bounded, and the teardown
+/// stops as soon as `owns` reports that a newer attempt uses the camera.
+pub async fn close_access_point(peripheral_id: &str, owns: impl Fn() -> bool) {
+    if !owns() {
+        return;
+    }
+    let mut rx = install_event_receiver(peripheral_id);
+    let stopped = async {
+        crate::platform::with_timeout(
+            ensure_link(peripheral_id, &mut rx),
+            TEARDOWN_RECONNECT_TIMEOUT,
+        )
+        .await
+        .unwrap_or(Err(LinkError::BleTimeout))?;
+        if !owns() {
+            return Err(LinkError::Cancelled);
+        }
+        crate::platform::with_timeout(
+            gatt_write(peripheral_id, NETWORK_TYPE, &[0x00], &mut rx),
+            TEARDOWN_COMMAND_TIMEOUT,
+        )
+        .await
+        .unwrap_or(Err(LinkError::BleTimeout))
+    }
+    .await;
+    match stopped {
+        Ok(()) => app_info!("BLE access point closed {}", short_id(peripheral_id)),
+        Err(error) => app_info!(
+            "BLE access point close skipped {}: {error:?}",
+            short_id(peripheral_id)
+        ),
+    }
+    // Dropping the receiver cancels the link, unless a newer attempt owns it.
+    rx.succeeded = !owns();
+}
+
+/// Use the current link when it is up with its characteristics, otherwise
+/// connect once more (no connect timeout retry).
+async fn ensure_link(peripheral_id: &str, rx: &mut BleReceiver) -> Result<(), LinkError> {
+    let (tx, linked) = futures_channel::oneshot::channel();
+    let id = peripheral_id.to_owned();
+    DispatchQueue::main().exec_async(move || {
+        let mut up = false;
+        with_peripheral(&id, |peripheral| {
+            up = unsafe { peripheral.state() } == CBPeripheralState::Connected
+                && find_characteristic(peripheral, NETWORK_TYPE).is_some();
+        });
+        let _ = tx.send(up);
+    });
+    if linked.await.unwrap_or(false) {
+        return Ok(());
+    }
+    connect_with_retries(peripheral_id, 0, rx).await
 }
 
 /// Sends the id of each peripheral that disconnects on `tx`, for example a

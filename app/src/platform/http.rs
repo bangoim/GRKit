@@ -66,14 +66,6 @@ pub(crate) async fn service_ready() -> bool {
     get_props_once(&camera_http_base()).await == StatusAttempt::Ready
 }
 
-/// A mounting card still proves the camera link is alive.
-pub(crate) async fn service_reachable() -> bool {
-    matches!(
-        get_props_once(&camera_http_base()).await,
-        StatusAttempt::Ready | StatusAttempt::CardNotReady
-    )
-}
-
 async fn get_props_once(base: &str) -> StatusAttempt {
     let url = format!("{base}/v1/props");
     let response = match camera_get(url).await {
@@ -132,6 +124,12 @@ pub async fn read_package(
         },
         info,
     ))
+}
+
+/// Whether the camera's own HTTP API (port 80) answers.
+#[cfg_attr(not(any(target_os = "ios", target_os = "android")), allow(dead_code))]
+pub(crate) async fn camera_api_answers() -> bool {
+    probe_camera_api(&camera_http_base()).await
 }
 
 /// Logs whether the camera's own HTTP API (port 80) answers, to tell a

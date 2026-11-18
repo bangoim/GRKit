@@ -1,6 +1,6 @@
 //! Non-iOS placeholder: Bluetooth is not available in this build.
 
-use crate::domain::{CameraStatus, LinkError, NearbyCamera, PackageInfo, RememberedCamera};
+use crate::domain::{LinkError, RememberedCamera};
 
 pub fn load_remembered() -> Option<RememberedCamera> {
     None
@@ -11,8 +11,10 @@ pub fn save_remembered(_camera: &RememberedCamera) -> Result<(), String> {
     Ok(())
 }
 
-pub fn start_scanning(tx: async_channel::Sender<Vec<NearbyCamera>>, _remembered_id: Option<&str>) {
-    let _ = tx.try_send(Vec::new());
+pub fn start_scanning(
+    _tx: async_channel::Sender<crate::domain::nearby_watch::Frame>,
+    _remembered_id: Option<&str>,
+) {
 }
 
 #[allow(dead_code)]
@@ -20,6 +22,6 @@ pub fn stop_scanning() {}
 
 pub fn watch_disconnects(_tx: async_channel::Sender<String>) {}
 
-pub async fn connect_camera() -> Result<(CameraStatus, PackageInfo, RememberedCamera), LinkError> {
+pub async fn connect_camera() -> Result<super::Connected, LinkError> {
     Err(LinkError::BluetoothUnavailable)
 }

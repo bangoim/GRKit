@@ -26,6 +26,7 @@ mod platform;
 mod shell;
 pub mod store;
 mod strings;
+mod strings_connect;
 mod strings_looks;
 mod ui;
 
