@@ -107,12 +107,13 @@ pub async fn read_package(
         log::warn!("HTTP props parse failed len={} err={e}", text.len());
         LinkError::Http(format!("props body ({} bytes): {e}", text.len()))
     })?;
-    let version = props
-        .grkit
-        .version
-        .as_deref()
-        .filter(|v| !v.is_empty())
-        .ok_or(LinkError::NeedsGrkit)?;
+    let Some(version) = props.grkit.version.as_deref().filter(|v| !v.is_empty()) else {
+        log::warn!(
+            "HTTP props without a GRKit version: {}",
+            text.chars().take(600).collect::<String>()
+        );
+        return Err(LinkError::NeedsGrkit);
+    };
     let (camera, info) = installed_to_models(version, props.camera.as_ref(), fallback_model)
         .map_err(|e| match e {
             PackageMapError::NeedsGrkit => LinkError::NeedsGrkit,
