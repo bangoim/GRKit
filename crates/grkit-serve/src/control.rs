@@ -13,6 +13,10 @@ pub struct Descriptor {
     pub mailbox_size: u32,
     pub mailbox_version: u32,
     pub epoch: [u32; 4],
+    /// The SD card CID that the firmware keeps in RAM, as 32 hex digits, on
+    /// builds where the installer knows its address.
+    #[serde(default)]
+    pub card_cid: Option<String>,
 }
 impl Descriptor {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
@@ -32,6 +36,9 @@ impl Descriptor {
                 && self.mailbox_version == CONTROL_VERSION_VALUE,
             "Unsupported control mailbox layout"
         );
+        if let Some(cid) = &self.card_cid {
+            crate::identity::normalized_cid(cid)?;
+        }
         for (address, size) in [
             (self.header_address, HOST_HEADER_SIZE as u32),
             (self.mailbox_address, self.mailbox_size),
@@ -87,6 +94,10 @@ pub struct Client<M: MailboxIo> {
     memory: M,
 }
 impl<M: MailboxIo> Client<M> {
+    #[cfg(test)]
+    pub(crate) fn memory(&self) -> &M {
+        &self.memory
+    }
     pub fn new(memory: M) -> Result<Self> {
         let mut client = Self { memory };
         client.reconcile()?;
@@ -412,17 +423,18 @@ impl<M: MailboxIo> Client<M> {
 /// Hashes must come from a verified release, not PACKAGE.TXT or filenames.
 /// An empty trust set cannot authorize executing an installer from the card.
 #[cfg(all(target_os = "linux", target_arch = "arm"))]
+/// The mailbox client and the normalized card CID of the descriptor.
 pub fn discover(
     root: &Path,
     trusted_installers: &BTreeMap<String, String>,
-) -> Result<Client<MappedMailbox>> {
+) -> Result<(Client<MappedMailbox>, Option<String>)> {
     platform::discover(root, trusted_installers)
 }
 #[cfg(not(all(target_os = "linux", target_arch = "arm")))]
 pub fn discover(
     _root: &Path,
     _trusted_installers: &BTreeMap<String, String>,
-) -> Result<Client<MappedMailbox>> {
+) -> Result<(Client<MappedMailbox>, Option<String>)> {
     bail!("Runtime control is available only on the camera's ARM Linux")
 }
 #[cfg(all(target_os = "linux", target_arch = "arm"))]
@@ -604,7 +616,7 @@ mod platform {
     pub(super) fn discover(
         root: &Path,
         trusted: &BTreeMap<String, String>,
-    ) -> Result<Client<MappedMailbox>> {
+    ) -> Result<(Client<MappedMailbox>, Option<String>)> {
         ensure!(
             !trusted.is_empty(),
             "No trusted control installer hashes are available"
@@ -636,6 +648,12 @@ mod platform {
             candidates.push((name, entry.path()));
         }
         candidates.sort();
+        // Another build's core can also find the mailbox, by relocation, but
+        // only the core of this firmware build knows where the card CID is.
+        // INSTALL.SH records the core that installed; try it first.
+        if let Some(installed) = installed_core(root) {
+            candidates.sort_by_key(|(name, _)| *name != installed);
+        }
         let mut failures = Vec::new();
         for (name, path) in candidates {
             // O_NOFOLLOW closes the directory-entry/open race for symlinks.
@@ -658,7 +676,14 @@ mod platform {
                 "Control installer digest does not match its verified release"
             );
             match run_installer(&bytes) {
-                Ok(descriptor) => return Client::new(MappedMailbox::map(&descriptor, lock)?),
+                Ok(descriptor) => {
+                    let cid = descriptor
+                        .card_cid
+                        .as_deref()
+                        .map(crate::identity::normalized_cid)
+                        .transpose()?;
+                    return Ok((Client::new(MappedMailbox::map(&descriptor, lock)?)?, cid));
+                }
                 Err(error) => failures.push(format!("{name}: {error:#}")),
             }
         }
@@ -670,6 +695,21 @@ mod platform {
                 failures.join("; ")
             }
         )
+    }
+    /// The core file that INSTALL.SH last installed with, from
+    /// `GRKIT/CORE.TXT`. A start with the fast path does not write it.
+    fn installed_core(root: &Path) -> Option<String> {
+        let mut text = String::new();
+        File::open(
+            root.join(grkit_core::card::DATA_FOLDER_PATH)
+                .join(grkit_core::runtime::CORE_CHOICE),
+        )
+        .ok()?
+        .take(64)
+        .read_to_string(&mut text)
+        .ok()?;
+        let name = text.split_whitespace().next()?;
+        installer_name(name).then(|| name.to_owned())
     }
     fn run_installer(bytes: &[u8]) -> Result<Descriptor> {
         // Execute the verified RAM copy, so replacing a card file after hashing
@@ -988,8 +1028,12 @@ mod tests {
             mailbox_size: CONTROL_SIZE as u32,
             mailbox_version: CONTROL_VERSION_VALUE,
             epoch: [0; 4],
+            card_cid: Some("aa585951454d552101deadbeef006201".into()),
         };
         descriptor.validate().unwrap();
+        let mut invalid = descriptor.clone();
+        invalid.card_cid = Some("00".into());
+        assert!(invalid.validate().is_err());
         let mut invalid = descriptor.clone();
         invalid.mailbox_version += 1;
         assert!(invalid.validate().is_err());

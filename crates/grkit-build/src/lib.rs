@@ -437,6 +437,9 @@ fn build_image_with(
             "-fno-stack-protector",
             "-fomit-frame-pointer",
             "-fno-pic",
+            // The build of the firmware, for the RAM reads that only this
+            // build can locate (the card CID of `--control-info`).
+            image.target.layout.define,
             "-I",
             path(&objects)?,
             "-c",

@@ -79,7 +79,7 @@ pub const BOOT_LOG: &str = "BOOT.TXT";
 /// keeps the last three quarters.
 const BOOT_LOG_LINES: u32 = 400;
 /// The core file that installed at the last start, in the data folder.
-const CORE_CHOICE: &str = "CORE.TXT";
+pub const CORE_CHOICE: &str = "CORE.TXT";
 /// The marker in RAM of the first SCAN.SH of a power-on.
 const BOOT_MARK: &str = "/tmp/grkit-boot";
 /// The marker in RAM of the start of the service (`SERVE_FILE`) in a

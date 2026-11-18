@@ -9,12 +9,13 @@ typedef uint32_t u32;
 static u8 manifest_bytes[LIBRARY_STORE_MANIFEST_MAX],content[GRKIT_GRF_MAX_SIZE+1],frame[GRKIT_CONTROL_PAYLOAD_BYTES];
 static struct library_manifest manifest;
 static struct library_snapshot_stream stream;
-static int valid=1,load_fault,live_calls,fail_on_live;
+static int valid=1,load_fault,live_calls,fail_on_live,loads;
 static int validate_grf(const u8 *bytes,u32 length) { return grkit_grf_validate(bytes,length); }
 static int live(void *context) { (void)context; ++live_calls; return valid && (!fail_on_live || live_calls!=fail_on_live); }
 static int load(void *context,u32 index,const u8 **bytes,u32 *length)
 {
     char path[1024]; assert(snprintf(path,sizeof(path),"%s/%u.grf",(const char *)context,index)<(int)sizeof(path));
+    ++loads;
     FILE *file=fopen(path,"rb"); if(!file) return 0;
     *length=(u32)fread(content,1,sizeof(content),file); int failed=ferror(file); fclose(file);
     struct library_manifest_entry entry; assert(library_manifest_get(&manifest,index,&entry));
@@ -50,7 +51,9 @@ int main(int argc,char **argv)
     assert(!library_snapshot_begin(&stream,&meta,token,&io,1,frame,sizeof(frame),&length));
     assert(!stream.active && !length); fail_on_live=0;
     if(manifest.listed) {
+        /* Without a description of these bytes, BEGIN reads and checks each content. */
         for(load_fault=1;load_fault<=3;++load_fault) {
+            stream.described=0;
             length=99; assert(!library_snapshot_begin(&stream,&meta,token,&io,1,frame,sizeof(frame),&length));
             assert(!stream.active && !length);
         }
@@ -88,11 +91,34 @@ int main(int argc,char **argv)
     valid=0; request(req); assert(!library_snapshot_end(&stream,&io,4,req,sizeof(req))); assert(!stream.active); valid=1;
     ++token[0]; assert(library_snapshot_begin(&stream,&meta,token,&io,5,frame,sizeof(frame),&length)); output(length);
     while(stream.next<library_store_word(stream.header+72)) {
-        request(req); assert(!library_snapshot_end(&stream,&io,6,req,sizeof(req)));
+        request(req);
         assert(library_snapshot_read(&stream,&meta,&io,6,req,sizeof(req),frame,sizeof(frame),&length)); output(length);
         assert(!library_snapshot_read(&stream,&meta,&io,6,req,sizeof(req),frame,sizeof(frame),&length));
     }
     request(req); assert(library_snapshot_end(&stream,&io,7,req,sizeof(req))); assert(!stream.active);
     assert(!library_snapshot_end(&stream,&io,7,req,sizeof(req)));
+    /* A reader that holds the bytes of this digest releases the pin after
+       BEGIN. The request must still name the stream and its next offset. */
+    ++token[0]; assert(library_snapshot_begin(&stream,&meta,token,&io,8,frame,sizeof(frame),&length));
+    request(req); library_store_put(req+76,stream.next+1);
+    assert(!library_snapshot_end(&stream,&io,8,req,sizeof(req))); assert(stream.active);
+    request(req); req[4]^=1;
+    assert(!library_snapshot_end(&stream,&io,8,req,sizeof(req))); assert(stream.active);
+    request(req); assert(library_snapshot_end(&stream,&io,8,req,sizeof(req))); assert(!stream.active);
+    /* Equal metadata describes equal bytes: BEGIN reuses the digest and
+       loads only the content of its first frame. */
+    u8 digest[32]; memcpy(digest,stream.header+80,32); u32 total=library_store_word(stream.header+72);
+    loads=0; ++token[0]; assert(library_snapshot_begin(&stream,&meta,token,&io,9,frame,sizeof(frame),&length));
+    assert(!memcmp(stream.header+80,digest,32) && library_store_word(stream.header+72)==total);
+    assert(loads<=1);
+    request(req); assert(library_snapshot_end(&stream,&io,9,req,sizeof(req)));
+    /* Other metadata reads and hashes every content again. */
+    meta.generation=8; loads=0; ++token[0];
+    assert(library_snapshot_begin(&stream,&meta,token,&io,10,frame,sizeof(frame),&length));
+    assert(loads>=(int)stream.content_count && memcmp(stream.header+80,digest,32));
+    while(stream.next<library_store_word(stream.header+72)) {
+        request(req); assert(library_snapshot_read(&stream,&meta,&io,10,req,sizeof(req),frame,sizeof(frame),&length));
+    }
+    request(req); assert(library_snapshot_end(&stream,&io,10,req,sizeof(req)));
     return 0;
 }

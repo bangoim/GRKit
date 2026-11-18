@@ -44,6 +44,9 @@ struct library_owner {
     u32 positions[2];
     u8 candidate[LIBRARY_STORE_MANIFEST_MAX];
     u8 scratch[LIBRARY_STORE_MANIFEST_MAX];
+    /* One card block: the card reads a whole block for each smaller read,
+       so skipping with smaller reads reads each block several times. */
+    u8 discard[512];
 };
 static const char *library_owner_path(u32 slot)
 { return slot ? "C:\\GRKIT\\LIB1.BIN" : "C:\\GRKIT\\LIB0.BIN"; }
@@ -66,11 +69,10 @@ static int library_owner_close_all(struct library_owner *owner)
 }
 static int library_owner_position(struct library_owner *owner,u32 slot,u32 offset)
 {
-    u8 discard[64];
     while(owner->positions[slot]<offset) {
         u32 left=offset-owner->positions[slot];
-        u32 count=left<sizeof(discard)?left:(u32)sizeof(discard),read=0;
-        if(owner->fs.read((u32)owner->handles[slot],discard,count,&read) || read!=count) return 1;
+        u32 count=left<sizeof(owner->discard)?left:(u32)sizeof(owner->discard),read=0;
+        if(owner->fs.read((u32)owner->handles[slot],owner->discard,count,&read) || read!=count) return 1;
         owner->positions[slot]+=count;
     }
     return 0;

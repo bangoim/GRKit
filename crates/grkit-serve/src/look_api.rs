@@ -8,7 +8,7 @@ use crate::{
         check_precondition, valid_request_id, Admission, Intent, Problem, RecordedResult,
         RequestCache, Watermark,
     },
-    runtime_backend::{RuntimeBackend, RuntimeSnapshot},
+    runtime_backend::{RuntimeBackend, RuntimeCapabilities, RuntimeSnapshot},
     Request,
 };
 use grkit_core::{effects, packaging};
@@ -34,7 +34,14 @@ pub struct LookApi {
     backend: Mutex<Box<dyn RuntimeBackend>>,
     recovery: AtomicBool,
     pending: Mutex<Option<PendingApply>>,
+    /// The identity that the backend verified in this session. Requests that
+    /// find the backend busy use it instead of waiting for the owner.
+    identity: Mutex<Option<String>>,
+    /// The runtime properties of the last verified snapshot and its card.
+    properties: Mutex<Option<(String, Value)>>,
 }
+/// How long an identity read waits for a busy backend before it answers 503.
+const IDENTITY_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 struct PendingApply {
     id: String,
     scope: Scope,
@@ -52,24 +59,49 @@ impl LookApi {
             backend: Mutex::new(backend),
             recovery: AtomicBool::new(false),
             pending: Mutex::new(None),
+            identity: Mutex::new(None),
+            properties: Mutex::new(None),
         }
     }
 
+    /// The card cannot change while the service runs (removing it powers the
+    /// camera off), so a request that finds the backend busy with another
+    /// request uses the identity verified earlier in the session.
     pub fn card_identity(&self) -> Result<String> {
-        self.backend
-            .try_lock()
-            .map_err(lock_problem)?
-            .card_identity()
-            .inspect_err(|error| {
-                if error.code == "recovery_required" {
-                    self.recovery.store(true, Ordering::Release);
+        let deadline = Instant::now() + IDENTITY_WAIT;
+        let mut backend = loop {
+            match self.backend.try_lock() {
+                Ok(backend) => break backend,
+                Err(TryLockError::Poisoned(_)) => return Err(coordinator()),
+                Err(TryLockError::WouldBlock) => {
+                    if let Some(known) = self.identity.lock().map_err(|_| coordinator())?.clone() {
+                        return Ok(known);
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(problem(
+                            503,
+                            "runtime_busy",
+                            "The runtime is answering another request.",
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
                 }
-            })
+            }
+        };
+        let result = backend.card_identity().inspect_err(|error| {
+            if error.code == "recovery_required" {
+                self.recovery.store(true, Ordering::Release);
+            }
+        });
+        *self.identity.lock().map_err(|_| coordinator())? = result.as_ref().ok().cloned();
+        result
     }
 
     pub fn invalidate_session(&self) -> Result<()> {
         let mut backend = self.backend.lock().map_err(|_| coordinator())?;
         backend.invalidate_session();
+        *self.identity.lock().map_err(|_| coordinator())? = None;
+        *self.properties.lock().map_err(|_| coordinator())? = None;
         // Losing identity or rebuilding a session is not proof that an
         // uncertain commit was recovered. Keep quarantine on the same medium.
         Ok(())
@@ -78,35 +110,50 @@ impl LookApi {
     pub fn accept_new_card(&self) -> Result<()> {
         let mut backend = self.backend.lock().map_err(|_| coordinator())?;
         backend.invalidate_session();
+        *self.identity.lock().map_err(|_| coordinator())? = None;
+        *self.properties.lock().map_err(|_| coordinator())? = None;
         *self.pending.lock().map_err(|_| coordinator())? = None;
         self.recovery.store(false, Ordering::Release);
         Ok(())
     }
 
-    /// Probe the same trusted snapshot path used by resource reads. Capability
-    /// flags come from the backend, not from merely finding a mailbox.
+    /// The runtime state for /props, without a runtime command: the
+    /// properties of the last snapshot that a Looks request verified in this
+    /// session, or "unverified" before the first one.
     pub fn runtime_properties(&self, card_id: &str) -> Result<Value> {
         self.require_ready()?;
-        let mut backend = self.backend.try_lock().map_err(lock_problem)?;
-        let snapshot = backend.snapshot().inspect_err(|error| {
-            if error.code == "recovery_required" {
-                self.recovery.store(true, Ordering::Release);
+        if let Some((card, properties)) = &*self.properties.lock().map_err(|_| coordinator())? {
+            if card == card_id {
+                return Ok(properties.clone());
             }
-        })?;
-        let context = RequestContext {
-            device_id: "",
-            boot_id: "",
-            card_id,
-            write_allowed: false,
-            software_pending: false,
+        }
+        let capabilities = match self.backend.try_lock() {
+            Ok(backend) => backend.capabilities(),
+            Err(TryLockError::WouldBlock) => Default::default(),
+            Err(TryLockError::Poisoned(_)) => return Err(coordinator()),
         };
-        self.validate_snapshot(&snapshot, &context)?;
-        let capabilities = backend.capabilities();
-        Ok(
-            json!({"state":"ready","busyReason":null,"epoch":snapshot.runtime_epoch,
-            "generation":snapshot.generation,"configurationRevision":snapshot.revision()?,
-            "capabilities":{"read":capabilities.readable,"write":capabilities.hot_reload,"hotReload":capabilities.hot_reload}}),
-        )
+        if capabilities.unsupported {
+            return Err(problem(
+                503,
+                "runtime_protocol_unsupported",
+                "Looks are managed only after a start with the fast path.",
+            ));
+        }
+        Ok(json!({"state":"unverified","busyReason":null,
+            "capabilities":{"read":false,"write":false,"hotReload":false}}))
+    }
+    fn remember(&self, snapshot: &RuntimeSnapshot, capabilities: RuntimeCapabilities) {
+        let Ok(revision) = snapshot.revision() else {
+            return;
+        };
+        if let Ok(mut properties) = self.properties.lock() {
+            *properties = Some((
+                snapshot.card_id.clone(),
+                json!({"state":"ready","busyReason":null,"epoch":snapshot.runtime_epoch,
+                "generation":snapshot.generation,"configurationRevision":revision,
+                "capabilities":{"read":capabilities.readable,"write":capabilities.hot_reload,"hotReload":capabilities.hot_reload}}),
+            ));
+        }
     }
 
     pub fn recovery_required(&self) -> bool {
@@ -287,6 +334,7 @@ impl LookApi {
             }
         })?;
         self.validate_snapshot(&snapshot, context)?;
+        self.remember(&snapshot, backend.capabilities());
         let watermark = observe(&snapshot, context, hub, None)?;
         let reply = match route {
             Route::Collection => {
@@ -479,6 +527,7 @@ impl LookApi {
                 .as_mut()
                 .ok_or_else(coordinator)?
                 .receipt = Some(receipt.clone());
+            self.remember(&receipt, backend.capabilities());
             observe(&receipt, context, hub, Some(id))?;
             let result = mutation_result(&receipt, &scope)?;
             recovering = false;
@@ -1030,6 +1079,66 @@ mod tests {
         time::Duration,
     };
 
+    struct IdentityOnly {
+        unsupported: bool,
+    }
+    impl RuntimeBackend for IdentityOnly {
+        fn card_identity(&mut self) -> Result<String> {
+            Ok("card-a".into())
+        }
+        fn capabilities(&self) -> RuntimeCapabilities {
+            RuntimeCapabilities {
+                unsupported: self.unsupported,
+                ..Default::default()
+            }
+        }
+        fn snapshot(&mut self) -> Result<RuntimeSnapshot> {
+            panic!("/props must not read a runtime snapshot");
+        }
+        fn apply(&mut self, _: &str, _: Prepared) -> Result<RuntimeSnapshot> {
+            panic!("read-only");
+        }
+    }
+    #[test]
+    fn a_busy_backend_answers_identity_from_the_session_and_props_from_memory() {
+        let api = Arc::new(LookApi::new(Box::new(IdentityOnly { unsupported: false })));
+        // Before any identity, a request that finds the backend busy waits
+        // for a bounded time and then answers a retryable status.
+        let busy = api.backend.lock().unwrap();
+        let waiting = Arc::clone(&api);
+        let started = Instant::now();
+        let error = std::thread::spawn(move || waiting.card_identity())
+            .join()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!((error.status, error.code), (503, "runtime_busy"));
+        assert!(started.elapsed() >= IDENTITY_WAIT);
+        drop(busy);
+        assert_eq!(api.card_identity().unwrap(), "card-a");
+        // Later requests do not wait for a busy backend.
+        let busy = api.backend.lock().unwrap();
+        let reader = Arc::clone(&api);
+        assert_eq!(
+            std::thread::spawn(move || reader.card_identity())
+                .join()
+                .unwrap()
+                .unwrap(),
+            "card-a"
+        );
+        let reader = Arc::clone(&api);
+        let properties = std::thread::spawn(move || reader.runtime_properties("card-a"))
+            .join()
+            .unwrap()
+            .unwrap();
+        assert_eq!(properties["state"], "unverified");
+        drop(busy);
+        let normal = LookApi::new(Box::new(IdentityOnly { unsupported: true }));
+        assert_eq!(
+            normal.runtime_properties("card-a").unwrap_err().code,
+            "runtime_protocol_unsupported"
+        );
+    }
+
     // Test-only backend: models an acknowledged commit. It is never selectable
     // by the production service and does not establish physical camera safety.
     struct MemoryBackend {
@@ -1043,6 +1152,7 @@ mod tests {
                 readable: true,
                 hot_reload: self.state.lock().unwrap().context.hot_reload
                     && self.fault.load(Ordering::SeqCst) != 7,
+                unsupported: false,
             }
         }
         fn snapshot(&mut self) -> Result<RuntimeSnapshot> {
@@ -1392,6 +1502,23 @@ mod tests {
             body(&h.call("GET", "/v1/params/looks/order", b"", None, &[]))["ids"],
             json!(["requests", "order"])
         );
+    }
+    #[test]
+    fn the_order_that_get_returns_is_accepted_unchanged() {
+        let h = Harness::new();
+        for (index, id) in ["first", "second", "third"].into_iter().enumerate() {
+            assert_eq!(h.put(id, index as u32 + 1).status, 201);
+        }
+        let order = h.call("GET", "/v1/params/looks/order", b"", None, &[]);
+        let put = h.call(
+            "PUT",
+            "/v1/params/looks/order",
+            &order.body,
+            Some(4),
+            &[("If-Match", header_value(&order, "ETag"))],
+        );
+        assert_eq!(put.status, 200, "{}", body(&put));
+        assert_eq!(body(&put)["result"], body(&order));
     }
     #[test]
     fn deleted_look_results_remain_queryable_only_at_the_original_scope() {

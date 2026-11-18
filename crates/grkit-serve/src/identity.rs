@@ -1,8 +1,13 @@
-//! Identity discovery never writes the camera card. A missing hardware or
-//! filesystem identity disables mutations instead of guessing from a path.
+//! Identity discovery writes the camera card only to create its marker once.
+//! A missing hardware or card identity disables mutations instead of
+//! guessing from a path.
 use anyhow::{bail, Context, Result};
 use grkit_core::packaging::sha256;
-use std::{fs, io::Read, path::Path};
+use std::{
+    fs,
+    io::{Read, Write},
+    path::Path,
+};
 
 pub fn boot_id() -> Result<String> {
     let mut bytes = [0u8; 16];
@@ -49,39 +54,94 @@ pub fn card_id(cid: &str, sector: &[u8]) -> Result<String> {
     Ok(format!("card-{}", sha256(&identity)))
 }
 
-pub fn mounted_card_id(root: &Path) -> Result<String> {
-    let mounts = fs::read_to_string("/proc/mounts")?;
-    let root = root.to_str().context("Invalid card path")?;
-    let device = mounts
-        .lines()
-        .find_map(|line| {
-            let mut fields = line.split_whitespace();
-            let device = fields.next()?;
-            (fields.next()? == root).then_some(device)
-        })
-        .context("The card is not mounted")?;
-    let name = Path::new(device)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .context("Invalid card device")?;
-    // Follow only the kernel's resolved block-device topology. Partition sysfs
-    // nodes have no device/cid; the parent disk owns it.
-    let block = fs::canonicalize(Path::new("/sys/class/block").join(name))?;
-    let disk = if block.join("partition").exists() {
-        block.parent().context("Missing card device")?
-    } else {
-        &block
+/// The CID as 32 lowercase hex digits, with the CRC7/end byte as 00 (see
+/// `card_id`).
+pub fn normalized_cid(cid: &str) -> Result<String> {
+    let cid = cid.trim();
+    if cid.len() != 32
+        || !cid.bytes().all(|c| c.is_ascii_hexdigit())
+        || cid[..30].bytes().all(|c| c == b'0')
+    {
+        bail!("The SD card CID is unavailable");
+    }
+    let mut cid = cid.to_ascii_lowercase();
+    cid.replace_range(30..32, "00");
+    Ok(cid)
+}
+
+/// The card ID that the service publishes on every kind of start: the CID of
+/// the medium and the random marker of `card_marker`. A format of the card
+/// removes the marker, and the CID keeps a copied marker from naming another
+/// card. Both inputs are in RAM or on the card on a start with or without the
+/// fast path.
+pub fn public_card_id(cid: &str, marker: &str) -> Result<String> {
+    let cid = normalized_cid(cid)?;
+    if marker.len() != 32
+        || !marker
+            .bytes()
+            .all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        bail!("The card marker is invalid");
+    }
+    Ok(format!(
+        "card-{}",
+        sha256(format!("grkit-card-1:{cid}:{marker}").as_bytes())
+    ))
+}
+
+/// The marker file that completes the card identity.
+pub const MARKER: &str = "GRKIT/CARD.ID";
+
+/// Read the card marker, or create it once with 128 random bits. This is the
+/// only write of identity discovery: one small file in the life of a card.
+pub fn card_marker(root: &Path) -> Result<String> {
+    let path = root.join(MARKER);
+    let read = |path: &Path| -> Result<String> {
+        let mut text = String::new();
+        fs::File::open(path)?.take(64).read_to_string(&mut text)?;
+        let marker = text.trim().to_owned();
+        if marker.len() != 32
+            || !marker
+                .bytes()
+                .all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            bail!("The card marker is invalid");
+        }
+        Ok(marker)
     };
-    let cid = fs::read_to_string(disk.join("device/cid"))?;
-    let mut sector = [0; 512];
-    fs::File::open(device)?.read_exact(&mut sector)?;
-    card_id(&cid, &sector)
+    match read(&path) {
+        Ok(marker) => return Ok(marker),
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
+        Err(error) => return Err(error),
+    }
+    let mut bytes = [0u8; 16];
+    fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    let marker: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .context("Create the card marker")?;
+    file.write_all(marker.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    // Read it back: a card that drops the write must not get a new
+    // identity at each start.
+    let stored = read(&path)?;
+    if stored != marker {
+        bail!("The card marker did not persist");
+    }
+    Ok(stored)
 }
 
 /// Independent RTOS card probe: GRC1 + raw 16-byte CID + mounted FAT boot sector.
 /// The owner must select and verify its mounted volume before publishing this
 /// evidence. No manifest or previous HTTP card ID is involved.
-pub fn owner_evidence(bytes: &[u8]) -> Result<String> {
+/// Returns the owner's card ID and the normalized CID.
+pub fn owner_evidence(bytes: &[u8]) -> Result<(String, String)> {
     if bytes.len() != 532 || &bytes[..4] != b"GRC1" {
         bail!("Invalid owner card-identity evidence");
     }
@@ -89,7 +149,7 @@ pub fn owner_evidence(bytes: &[u8]) -> Result<String> {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    card_id(&cid, &bytes[20..])
+    Ok((card_id(&cid, &bytes[20..])?, normalized_cid(&cid)?))
 }
 
 #[cfg(test)]
@@ -133,7 +193,11 @@ mod tests {
             bytes.push(u8::from_str_radix(&cid[offset..offset + 2], 16).unwrap());
         }
         bytes.extend(sector());
-        assert_eq!(owner_evidence(&bytes).unwrap(), expected);
+        assert_eq!(owner_evidence(&bytes).unwrap().0, expected);
+        assert_eq!(
+            owner_evidence(&bytes).unwrap().1,
+            "aa585951454d552101deadbeef006200"
+        );
         assert!(owner_evidence(&bytes[..531]).is_err());
         bytes[0] = 0;
         assert!(owner_evidence(&bytes).is_err());
@@ -154,6 +218,32 @@ mod tests {
         assert_ne!(first, card_id(cid, &boot).unwrap());
         boot[105] = 2;
         assert!(card_id(cid, &boot).is_err());
+    }
+    #[test]
+    fn published_identity_binds_the_medium_and_its_marker() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(card_marker(root.path()).is_err(), "no GRKIT folder");
+        fs::create_dir(root.path().join("GRKIT")).unwrap();
+        let marker = card_marker(root.path()).unwrap();
+        assert_eq!(card_marker(root.path()).unwrap(), marker, "created once");
+        let cid = "aa585951454d552101deadbeef006201";
+        let id = public_card_id(cid, &marker).unwrap();
+        // The CRC byte differs between the RTOS and Linux readings.
+        assert_eq!(
+            public_card_id("AA585951454D552101DEADBEEF0062FF", &marker).unwrap(),
+            id
+        );
+        assert_ne!(
+            public_card_id("ab585951454d552101deadbeef006201", &marker).unwrap(),
+            id
+        );
+        // A format removes the marker: the next start makes a new identity.
+        fs::remove_file(root.path().join(MARKER)).unwrap();
+        let formatted = card_marker(root.path()).unwrap();
+        assert_ne!(public_card_id(cid, &formatted).unwrap(), id);
+        fs::write(root.path().join(MARKER), "not hex").unwrap();
+        assert!(card_marker(root.path()).is_err());
+        assert!(public_card_id("00000000000000000000000000000001", &marker).is_err());
     }
     #[test]
     fn unsupported_or_missing_identity_fails_closed() {

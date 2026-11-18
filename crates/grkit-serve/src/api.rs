@@ -172,14 +172,18 @@ impl Service {
                 Duration::from_secs(900),
             )),
             verified_card: Mutex::new(None),
-            card_identity: crate::identity::mounted_card_id,
+            card_identity: |_| {
+                anyhow::bail!(
+                    "Linux mounts the card through the firmware and has no identity of its own"
+                )
+            },
             release_keys: grkit_core::release::OFFICIAL_KEYS.to_vec(),
             looks: crate::look_api::LookApi::new(backend),
             boot_id,
         }
     }
-    /// Prefer evidence from the RTOS owner on cameras whose Linux mount is a
-    /// loop device. When both sources exist they must identify the same card.
+    /// The runtime backend identifies the card (`identity::public_card_id`).
+    /// When another source also identifies it, both must agree.
     pub fn current_card_id(&self, root: &std::path::Path) -> anyhow::Result<String> {
         let kernel = (self.card_identity)(root);
         match self.looks.card_identity() {
@@ -413,6 +417,14 @@ impl Service {
             )),
         }
     }
+    /// Another verified identity than the one a request started with. An
+    /// identity that becomes known, or that a busy runtime cannot confirm, is
+    /// no change of card.
+    fn card_changed(&self, env: &Env<impl Files>, card_id: Option<&str>) -> bool {
+        self.current_card_id(env.card.root())
+            .ok()
+            .is_some_and(|current| card_id.is_some_and(|card_id| card_id != current))
+    }
     fn props(&self, env: &Env<impl Files>) -> Reply {
         let card_id = match self.poll_card_identity(env.card.root()) {
             Ok(identity) => identity,
@@ -436,7 +448,7 @@ impl Service {
             .cloned()
             .unwrap_or_else(|| json!({"read":false,"write":false,"hotReload":false}));
         let camera = (env.device)().ok();
-        if self.current_card_id(env.card.root()).ok() != card_id {
+        if self.card_changed(env, card_id.as_deref()) {
             return Reply::problem(Problem::new(
                 409,
                 "context_changed",
@@ -470,7 +482,7 @@ impl Service {
                 return unavailable("coordinator_unavailable", "The coordinator is unavailable.");
             }
         };
-        if self.current_card_id(env.card.root()).ok() != card_id {
+        if self.card_changed(env, card_id.as_deref()) {
             return Reply::problem(Problem::new(
                 409,
                 "context_changed",
@@ -562,7 +574,7 @@ impl Service {
                 return unavailable("coordinator_unavailable", "The coordinator is unavailable.");
             }
         };
-        if self.current_card_id(env.card.root()).ok() != card_id {
+        if self.card_changed(env, card_id.as_deref()) {
             return Reply::problem(Problem::new(
                 409,
                 "context_changed",
@@ -1209,6 +1221,7 @@ mod tests {
                 crate::runtime_backend::RuntimeCapabilities {
                     readable: !self.uncertain,
                     hot_reload: !self.uncertain && self.state.context.hot_reload,
+                    unsupported: false,
                 }
             }
             fn card_identity(&mut self) -> Result<String, Problem> {

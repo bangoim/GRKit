@@ -40,7 +40,8 @@ fn main() -> Result<()> {
     }
     let mut nonce = [0; 16];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut nonce)?;
-    let mut client = control::discover(Path::new(&args[0]), &trusted)?;
+    let (mut client, cid) = control::discover(Path::new(&args[0]), &trusted)?;
+    println!("cardCid {cid:?}");
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let state = client.reconcile()?;
@@ -122,7 +123,10 @@ fn main() -> Result<()> {
             matches!(outcome, State::Completed { result: 0, .. }),
             "Owner identity probe was rejected"
         );
-        println!("cardId {}", grkit_serve::identity::owner_evidence(&bytes)?);
+        println!(
+            "cardId {}",
+            grkit_serve::identity::owner_evidence(&bytes)?.0
+        );
         println!(
             "ownerCid {}",
             bytes[4..20]

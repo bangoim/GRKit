@@ -168,6 +168,9 @@ impl RuntimeSnapshot {
 pub struct RuntimeCapabilities {
     pub readable: bool,
     pub hot_reload: bool,
+    /// The runtime answered that it has no Looks owner: a start without the
+    /// fast path. Looks stay unavailable until the camera starts again.
+    pub unsupported: bool,
 }
 pub trait RuntimeBackend: Send {
     fn card_identity(&mut self) -> Result<String> {
@@ -226,10 +229,25 @@ pub struct ControlBackend<M: crate::control::MailboxIo> {
     official_hashes: BTreeMap<String, String>,
     pending_receipt: Option<PendingReceipt>,
     pending_read: Option<crate::control::Ticket>,
-    /// The owner's answer to the card identity probe, kept for the session:
-    /// removing the card powers the camera off, so the card cannot change
-    /// while the service runs, and each probe reads the card.
+    /// The published card identity, kept for the session: removing the card
+    /// powers the camera off, so the card cannot change while the service
+    /// runs, and each owner probe reads the card.
     card_identity: Option<Result<String>>,
+    /// The owner's own card ID, which its snapshots and commit pins carry.
+    owner_card: Option<String>,
+    /// The card CID that discovery read from RTOS memory.
+    ram_cid: Option<String>,
+    /// The mounted card, whose marker completes the published identity.
+    /// Without it (tests), the published identity is the owner's card ID.
+    card_root: Option<std::path::PathBuf>,
+    owner_unsupported: bool,
+    /// The mailbox held a Looks command of an earlier producer: an owner
+    /// answered in this start, so its outcome must be reconciled.
+    inherited_library: bool,
+    /// The last complete snapshot and the stream that carried it. A BEGIN
+    /// with the same epoch, card, generation, size, and digest describes the
+    /// same bytes, so the chunks need not be read again.
+    snapshot_cache: Option<(StreamFrame, RuntimeSnapshot)>,
 }
 struct PendingReceipt {
     before: RuntimeSnapshot,
@@ -250,9 +268,11 @@ impl LinuxBackend {
         anyhow::ensure!(nonce != [0; 16], "The HTTP boot nonce must be nonzero");
         let statement = crate::trust::installed_release(root, keys)?;
         let hashes = crate::trust::installer_hashes(&statement);
-        let client = crate::control::discover(root, &hashes)?;
+        let (client, cid) = crate::control::discover(root, &hashes)?;
         let mut backend = Self::new(client, nonce);
         backend.official_hashes = statement.official_looks;
+        backend.ram_cid = cid;
+        backend.card_root = Some(root.to_path_buf());
         Ok(backend)
     }
 }
@@ -270,6 +290,12 @@ impl<M: crate::control::MailboxIo> ControlBackend<M> {
             pending_receipt: None,
             pending_read: None,
             card_identity: None,
+            owner_card: None,
+            ram_cid: None,
+            card_root: None,
+            owner_unsupported: false,
+            inherited_library: false,
+            snapshot_cache: None,
         }
     }
     pub fn transport_verified(&self) -> bool {
@@ -306,6 +332,7 @@ impl<M: crate::control::MailboxIo> ControlBackend<M> {
                         return Err(invalid("Unknown inherited runtime command."));
                     }
                     self.startup_reconciling |= command >= CONTROL_SNAPSHOT_BEGIN;
+                    self.inherited_library |= command >= CONTROL_SNAPSHOT_BEGIN;
                     return Err(runtime_busy());
                 }
                 State::Completed {
@@ -324,6 +351,7 @@ impl<M: crate::control::MailboxIo> ControlBackend<M> {
                     if (CONTROL_SNAPSHOT_BEGIN..=CONTROL_CARD_IDENTITY).contains(&command) =>
                 {
                     self.startup_reconciling = true;
+                    self.inherited_library = true;
                     let ticket = self
                         .client
                         .completed_library_ticket()
@@ -492,7 +520,8 @@ impl<M: crate::control::MailboxIo> ControlBackend<M> {
         }
         result
     }
-    fn read_card_identity(&mut self) -> Result<String> {
+    /// The owner's card ID and the normalized CID of its evidence.
+    fn read_card_identity(&mut self) -> Result<(String, String)> {
         self.probe()?;
         let crate::control::State::Idle { generation, .. } = self
             .client
@@ -510,6 +539,49 @@ impl<M: crate::control::MailboxIo> ControlBackend<M> {
         }
         crate::identity::owner_evidence(&bytes)
             .map_err(|_| invalid("The owner card identity evidence is invalid."))
+    }
+    /// The published identity from the CID that the owner or discovery read.
+    /// When both read one, they must name the same medium.
+    fn public_identity(&self, owner_cid: Option<&str>) -> Result<String> {
+        let cid = match (owner_cid, self.ram_cid.as_deref()) {
+            (Some(owner), Some(ram)) if owner != ram => {
+                return Err(Problem::new(
+                    503,
+                    "card_identity_conflict",
+                    "The runtime and Linux identify different cards.",
+                ))
+            }
+            (Some(cid), _) | (None, Some(cid)) => cid,
+            (None, None) => return Err(protocol_unsupported()),
+        };
+        let Some(root) = &self.card_root else {
+            return self.owner_card.clone().ok_or_else(protocol_unsupported);
+        };
+        crate::identity::card_marker(root)
+            .and_then(|marker| crate::identity::public_card_id(cid, &marker))
+            .map_err(|_| {
+                Problem::new(
+                    503,
+                    "card_identity_unavailable",
+                    "The card identity marker cannot be read or created.",
+                )
+            })
+    }
+    /// Replace the owner's card ID of a decoded snapshot with the published one.
+    fn publish_card(&mut self, owner: &str) -> Result<String> {
+        if self.card_root.is_none() {
+            return Ok(owner.to_owned());
+        }
+        if self.owner_card.is_none() {
+            let (card, cid) = self.read_card_identity()?;
+            let public = self.public_identity(Some(&cid))?;
+            self.owner_card = Some(card);
+            self.card_identity = Some(Ok(public));
+        }
+        match (&self.owner_card, &self.card_identity) {
+            (Some(card), Some(Ok(public))) if card == owner => Ok(public.clone()),
+            _ => Err(invalid("The runtime snapshot belongs to a different card.")),
+        }
     }
 
     fn read_snapshot(&mut self) -> Result<RuntimeSnapshot> {
@@ -541,6 +613,23 @@ impl<M: crate::control::MailboxIo> ControlBackend<M> {
         let generation = first.generation;
         let pin = first.clone();
         let mut stream = SnapshotStream::begin(first)?;
+        if !self.startup_reconciling {
+            if let Some((key, cached)) = &self.snapshot_cache {
+                if same_stream(key, &pin) {
+                    // The pin names the bytes of the cached snapshot. Release
+                    // it now: the remaining chunks would read the card again.
+                    let cached = cached.clone();
+                    let end = stream.next_request().encode()?;
+                    let (ack, bytes) = self.exchange(CONTROL_SNAPSHOT_END, generation, &end)?;
+                    if ack != generation || !bytes.is_empty() {
+                        return Err(invalid("The snapshot pin release was not acknowledged."));
+                    }
+                    self.snapshot_verified = true;
+                    self.hot_reload_verified = cached.context.hot_reload;
+                    return Ok(cached);
+                }
+            }
+        }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while !stream.complete() {
             if std::time::Instant::now() >= deadline {
@@ -563,15 +652,19 @@ impl<M: crate::control::MailboxIo> ControlBackend<M> {
             return Err(invalid("The snapshot pin release was not acknowledged."));
         }
         if self.startup_reconciling {
-            if self.read_card_identity()? != snapshot.card_id {
+            if self.read_card_identity()?.0 != snapshot.card_id {
                 return Err(invalid(
                     "The recovered snapshot belongs to a different card.",
                 ));
             }
             self.startup_reconciling = false;
         }
+        snapshot.card_id = self.publish_card(&snapshot.card_id)?;
         self.snapshot_verified = true;
         self.hot_reload_verified = snapshot.context.hot_reload;
+        let mut key = pin;
+        key.bytes.clear();
+        self.snapshot_cache = Some((key, snapshot.clone()));
         Ok(snapshot)
     }
 }
@@ -579,18 +672,53 @@ impl<M: crate::control::MailboxIo + Send> RuntimeBackend for ControlBackend<M> {
     fn card_identity(&mut self) -> Result<String> {
         self.probe()?;
         if self.startup_reconciling {
-            return self.snapshot().map(|snapshot| snapshot.card_id).map_err(|error| {
-                if error.code == "runtime_protocol_unsupported" {
-                    Problem::new(503,"startup_reconciliation_unsupported",
-                        "The inherited runtime session cannot provide a coherent recovery snapshot.")
-                } else { error }
-            });
+            match self.snapshot() {
+                Ok(snapshot) => return Ok(snapshot.card_id),
+                // Without a Looks owner (a start without the fast path), no
+                // Looks commit can have happened, so nothing needs to be
+                // reconciled. The card probe confirms that no owner answers.
+                Err(error)
+                    if error.code == "runtime_protocol_unsupported"
+                        && !self.inherited_library
+                        && self
+                            .read_card_identity()
+                            .is_err_and(|probe| probe.code == "runtime_protocol_unsupported") =>
+                {
+                    self.startup_reconciling = false;
+                    self.owner_unsupported = true;
+                    let result = self.public_identity(None);
+                    if result.is_ok() {
+                        self.card_identity = Some(result.clone());
+                    }
+                    return result;
+                }
+                Err(error) if error.code == "runtime_protocol_unsupported" => {
+                    return Err(Problem::new(
+                        503,
+                        "startup_reconciliation_unsupported",
+                        "The inherited runtime session cannot provide a coherent recovery snapshot.",
+                    ))
+                }
+                Err(error) => return Err(error),
+            }
         }
         if let Some(known) = &self.card_identity {
             return known.clone();
         }
-        let result = self.read_card_identity();
-        // Keep an identity, or a runtime that cannot probe the card; probe
+        let result = match self.read_card_identity() {
+            Ok((owner, cid)) => {
+                self.owner_card = Some(owner);
+                self.public_identity(Some(&cid))
+            }
+            // Without a Looks owner (a start without the fast path), the CID
+            // that discovery read from RTOS memory identifies the card.
+            Err(error) if error.code == "runtime_protocol_unsupported" => {
+                self.owner_unsupported = true;
+                self.public_identity(None)
+            }
+            Err(error) => Err(error),
+        };
+        // Keep an identity, or a runtime that cannot identify the card; probe
         // again after any other error.
         if result.as_ref().map_or_else(
             |error| error.code == "runtime_protocol_unsupported",
@@ -610,6 +738,7 @@ impl<M: crate::control::MailboxIo + Send> RuntimeBackend for ControlBackend<M> {
                 && self.hot_reload_verified
                 && !self.recovery_required
                 && !self.startup_reconciling,
+            unsupported: self.owner_unsupported,
         }
     }
     fn snapshot(&mut self) -> Result<RuntimeSnapshot> {
@@ -654,7 +783,14 @@ impl<M: crate::control::MailboxIo + Send> RuntimeBackend for ControlBackend<M> {
             let mut pin = StreamFrame {
                 token: token_hash[..16].try_into().unwrap(),
                 epoch: before.runtime_epoch,
-                card_hash: Sha256::digest(before.card_id.as_bytes()).into(),
+                // The owner pins its own card ID, not the published one.
+                card_hash: Sha256::digest(
+                    self.owner_card
+                        .as_deref()
+                        .unwrap_or(&before.card_id)
+                        .as_bytes(),
+                )
+                .into(),
                 generation: before.generation,
                 total: candidate.len() as u32,
                 offset: 0,
@@ -807,6 +943,16 @@ impl<M: crate::control::MailboxIo + Send> RuntimeBackend for ControlBackend<M> {
             }
         }
     }
+}
+
+/// Two BEGIN frames describe the same snapshot bytes. The token differs for
+/// each BEGIN, so it is not part of the comparison.
+fn same_stream(cached: &StreamFrame, first: &StreamFrame) -> bool {
+    cached.epoch == first.epoch
+        && cached.card_hash == first.card_hash
+        && cached.generation == first.generation
+        && cached.total == first.total
+        && cached.digest == first.digest
 }
 
 fn runtime_busy() -> Problem {
@@ -1147,7 +1293,9 @@ mod bridge_tests {
         evidence
     }
     fn card_id() -> String {
-        crate::identity::owner_evidence(&identity_evidence()).unwrap()
+        crate::identity::owner_evidence(&identity_evidence())
+            .unwrap()
+            .0
     }
     fn frame(bytes: &[u8]) -> StreamFrame {
         StreamFrame {
@@ -1201,8 +1349,9 @@ mod bridge_tests {
             use grkit_core::abi::*;
             let seq = self.words[CONTROL_REQUEST / 4];
             if seq != self.words[CONTROL_READY / 4] {
-                let (command, result, bytes) =
-                    self.replies.pop_front().expect("unexpected request");
+                let (command, result, bytes) = self.replies.pop_front().unwrap_or_else(|| {
+                    panic!("unexpected request {}", self.words[CONTROL_COMMAND / 4])
+                });
                 assert_eq!(self.words[CONTROL_COMMAND / 4], command);
                 self.words[CONTROL_RESPONSE_LENGTH / 4] = bytes.len() as u32;
                 self.words[CONTROL_RESPONSE_CHECKSUM / 4] = crc32fast::hash(&bytes);
@@ -1418,6 +1567,39 @@ mod bridge_tests {
     }
 
     #[test]
+    fn a_restarted_session_without_an_owner_identifies_the_card_from_ram() {
+        use grkit_core::abi::*;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("GRKIT")).unwrap();
+        // An earlier producer of this start attached and probed the card:
+        // the mailbox is idle at a later sequence, with no Looks command.
+        let mut memory = ScriptedMailbox::new(vec![
+            (CONTROL_PING, 0, vec![]),
+            (CONTROL_SNAPSHOT_BEGIN, CONTROL_UNSUPPORTED, vec![]),
+            (CONTROL_CARD_IDENTITY, CONTROL_UNSUPPORTED, vec![]),
+        ]);
+        for word in [
+            CONTROL_REQUEST,
+            CONTROL_CLAIMED,
+            CONTROL_READY,
+            CONTROL_RELEASE,
+        ] {
+            memory.words[word / 4] = 4;
+        }
+        let mut backend =
+            ControlBackend::new(crate::control::Client::new(memory).unwrap(), [5; 16]);
+        backend.card_root = Some(root.path().to_path_buf());
+        backend.ram_cid = Some("aa585951454d552101deadbeef006200".into());
+        let id = backend.card_identity().unwrap();
+        let marker = crate::identity::card_marker(root.path()).unwrap();
+        assert_eq!(
+            id,
+            crate::identity::public_card_id("aa585951454d552101deadbeef006200", &marker).unwrap()
+        );
+        assert!(!backend.startup_reconciling);
+        assert!(backend.capabilities().unsupported);
+    }
+    #[test]
     fn startup_rejects_a_changed_epoch_or_card_during_its_fresh_snapshot() {
         use grkit_core::abi::*;
         for change_epoch in [false, true] {
@@ -1460,6 +1642,115 @@ mod bridge_tests {
         assert_eq!(backend.snapshot().unwrap().card_id, card_id());
         assert!(backend.transport_verified());
         assert!(!backend.recovery_required);
+    }
+    #[test]
+    fn an_unchanged_stream_reuses_the_snapshot_and_releases_its_pin_early() {
+        use grkit_core::abi::*;
+        let bytes = snapshot();
+        let mut first = frame(&bytes);
+        first.bytes.truncate(100);
+        let mut rest = frame(&bytes);
+        rest.offset = 100;
+        rest.bytes.drain(..100);
+        let mut again = first.clone();
+        again.token = [9; 16];
+        let changed = snapshot_generation(8);
+        let mut newer = frame(&changed);
+        newer.generation = 8;
+        // The scripted mailbox panics on any request that it has no reply for:
+        // the second read must not ask for the second chunk.
+        let memory = ScriptedMailbox::new(vec![
+            (CONTROL_PING, 0, vec![]),
+            (CONTROL_SNAPSHOT_BEGIN, 0, first.encode().unwrap()),
+            (CONTROL_SNAPSHOT_READ, 0, rest.encode().unwrap()),
+            (CONTROL_SNAPSHOT_END, 0, vec![]),
+            (CONTROL_SNAPSHOT_BEGIN, 0, again.encode().unwrap()),
+            (CONTROL_SNAPSHOT_END, 0, vec![]),
+            (CONTROL_SNAPSHOT_BEGIN, 0, newer.encode().unwrap()),
+            (CONTROL_SNAPSHOT_END, 0, vec![]),
+        ]);
+        let mut backend =
+            ControlBackend::new(crate::control::Client::new(memory).unwrap(), [3; 16]);
+        let read = backend.snapshot().unwrap();
+        let reused = backend.snapshot().unwrap();
+        assert_eq!(reused.revision().unwrap(), read.revision().unwrap());
+        assert!(backend.client.memory().replies.len() == 2);
+        assert_eq!(backend.snapshot().unwrap().generation, 8);
+        assert!(backend.client.memory().replies.is_empty());
+    }
+    #[test]
+    fn the_published_identity_combines_the_cid_with_the_card_marker() {
+        use grkit_core::abi::*;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("GRKIT")).unwrap();
+        let cid = crate::identity::owner_evidence(&identity_evidence())
+            .unwrap()
+            .1;
+        let backend = |replies, ram: Option<&str>| {
+            let mut backend = ControlBackend::new(
+                crate::control::Client::new(ScriptedMailbox::new(replies)).unwrap(),
+                [3; 16],
+            );
+            backend.card_root = Some(root.path().to_path_buf());
+            backend.ram_cid = ram.map(str::to_owned);
+            backend
+        };
+        // A start with the fast path: the owner and RTOS memory agree.
+        let mut fast = backend(
+            vec![
+                (CONTROL_PING, 0, vec![]),
+                (CONTROL_CARD_IDENTITY, 0, identity_evidence()),
+                (
+                    CONTROL_SNAPSHOT_BEGIN,
+                    0,
+                    frame(&snapshot()).encode().unwrap(),
+                ),
+                (CONTROL_SNAPSHOT_END, 0, vec![]),
+            ],
+            Some(&cid),
+        );
+        let published = fast.card_identity().unwrap();
+        let marker = crate::identity::card_marker(root.path()).unwrap();
+        assert_eq!(
+            published,
+            crate::identity::public_card_id(&cid, &marker).unwrap()
+        );
+        assert_ne!(published, card_id());
+        // Snapshots carry the owner's ID; the backend publishes the same one.
+        assert_eq!(fast.snapshot().unwrap().card_id, published);
+        // A start without the fast path: RTOS memory alone gives the same ID.
+        let mut normal = backend(
+            vec![
+                (CONTROL_PING, 0, vec![]),
+                (CONTROL_CARD_IDENTITY, CONTROL_UNSUPPORTED, vec![]),
+            ],
+            Some(&cid),
+        );
+        assert_eq!(normal.card_identity().unwrap(), published);
+        assert!(normal.capabilities().unsupported);
+        // Two sources that name different media fail closed.
+        let mut conflict = backend(
+            vec![
+                (CONTROL_PING, 0, vec![]),
+                (CONTROL_CARD_IDENTITY, 0, identity_evidence()),
+            ],
+            Some("aa585951454d552101deadbeef006200"),
+        );
+        assert_eq!(
+            conflict.card_identity().unwrap_err().code,
+            "card_identity_conflict"
+        );
+        let mut none = backend(
+            vec![
+                (CONTROL_PING, 0, vec![]),
+                (CONTROL_CARD_IDENTITY, CONTROL_UNSUPPORTED, vec![]),
+            ],
+            None,
+        );
+        assert_eq!(
+            none.card_identity().unwrap_err().code,
+            "runtime_protocol_unsupported"
+        );
     }
     #[test]
     fn snapshot_begin_can_recover_a_newer_durable_generation_but_never_regress() {
@@ -1905,7 +2196,10 @@ mod bridge_tests {
         use grkit_core::abi::*;
         let mut other = identity_evidence();
         other[4] ^= 1;
-        assert_ne!(crate::identity::owner_evidence(&other).unwrap(), card_id());
+        assert_ne!(
+            crate::identity::owner_evidence(&other).unwrap().0,
+            card_id()
+        );
         // No snapshot response is installed: any unexpected snapshot request
         // would fail this scripted mailbox instead of fabricating a receipt.
         let memory = ScriptedMailbox::new(vec![
@@ -1963,7 +2257,7 @@ mod bridge_tests {
         sector[66] = 0x29;
         sector[67..71].copy_from_slice(&[1, 2, 3, 4]);
         evidence.extend(sector);
-        let expected = crate::identity::owner_evidence(&evidence).unwrap();
+        let expected = crate::identity::owner_evidence(&evidence).unwrap().0;
         let memory = ScriptedMailbox::new(vec![
             (CONTROL_PING, 0, vec![]),
             (CONTROL_CARD_IDENTITY, 0, evidence),

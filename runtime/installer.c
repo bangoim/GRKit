@@ -966,6 +966,38 @@ static int install(void)
     print("GR_MODULE_INSTALLED "); number(count); print("\n");
     return 0;
 }
+#if !defined(RTOS_NATIVE) && (defined(GRKIT_TARGET_GR3_221) || defined(GRKIT_TARGET_GR4_121))
+#if defined(GRKIT_TARGET_GR3_221)
+#include "fastboot/targets/gr3-2.21.h"
+#else
+#include "fastboot/targets/gr4-1.21.h"
+#endif
+/* Reads outside the mapping answer 0, so that a wrong pointer fails the
+   checks of the card reader instead of the discovery. */
+static u32 card_word(u32 address)
+{ return address>=MAP_BASE && address-MAP_BASE<=MAP_SIZE-4U ? word(address) : 0; }
+static u8 card_byte(u32 address)
+{ return address>=MAP_BASE && address-MAP_BASE<MAP_SIZE ? at(address)[0] : 0; }
+#define LIBRARY_CARD_TARGET_WORD(address) card_word(address)
+#define LIBRARY_CARD_TARGET_BYTE(address) card_byte(address)
+#include "library_card_target.h"
+/* The CID that the firmware keeps in RAM for the inserted card, after the
+   media-manager and driver checks of the resident reader. On a start without
+   the fast path, no resident reader runs, and this CID names the card. It
+   reads RAM only, not the card. */
+static void print_card_cid(void)
+{
+    struct library_card_target target={0,0}; u8 cid[16];
+    if(!library_card_target_cid(&target,cid)) return;
+    static const char hex[]="0123456789abcdef";
+    char text[33];
+    for(u32 i=0;i<16;++i) { text[2*i]=hex[cid[i]>>4]; text[2*i+1]=hex[cid[i]&15]; }
+    text[32]=0;
+    print(",\"cardCid\":\""); print(text); print("\"");
+}
+#else
+static void print_card_cid(void) {}
+#endif
 #ifndef RTOS_NATIVE
 /* Discover a live mailbox from the interpreter's current array table. The
    pointers in a header are insufficient: prove the complete mailbox lies in
@@ -1005,7 +1037,9 @@ static int control_info(void)
     print(",\"mailboxVersion\":"); number(GRKIT_CONTROL_VERSION_VALUE);
     print(",\"epoch\":[");
     for(i=0;i<4;++i) { if(i) print(","); number(word(control+GRKIT_CONTROL_EPOCH+4*i)); }
-    print("]}\n");
+    print("]");
+    print_card_cid();
+    print("}\n");
     return 0;
 }
 static int control_discover(void)

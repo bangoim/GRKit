@@ -15,6 +15,14 @@ struct library_snapshot_stream {
     u8 header[LIBRARY_STREAM_HEADER];
     u32 active,started,next,metadata_length,content_count;
     u32 indices[64],sizes[64];
+    /* The last stream that BEGIN described, by the SHA-256 of its metadata
+       JSON. The JSON names each content by its SHA-256, so equal metadata
+       means equal stream bytes: BEGIN then reuses the digest instead of
+       reading every GRF from the card again. READ still loads and checks
+       each content that it sends. */
+    u32 described,described_total;
+    u8 metadata[32],described_metadata[32],described_digest[32];
+    u32 described_sizes[64];
 };
 /* Compare lengths without overflowing a pointer-end addition. */
 static int library_snapshot_overlap(const void *left,u32 left_size,const void *right,u32 right_size)
@@ -150,28 +158,43 @@ static int library_snapshot_begin(struct library_snapshot_stream *stream,const s
         for(u32 j=stream->content_count;j>position;--j) stream->indices[j]=stream->indices[j-1];
         stream->indices[position]=i; ++stream->content_count;
     }
+    /* Scratch in the stream state: the owner stack frame is small. */
     struct library_sha256_state hash; library_sha256_init(&hash);
-    u8 word[4]; library_store_put(word,stream->metadata_length);
-    if(!library_sha256_update(&hash,word,4)) return 0;
-    sink.context=&hash; sink.write=library_snapshot_hash;
-    if(!library_snapshot_json(meta,&sink) || sink.count!=stream->metadata_length) return 0;
-    u32 total=4+stream->metadata_length;
-    for(u32 i=0;i<stream->content_count;++i) {
-        const u8 *bytes; u32 size;
-        if(!io->load_content(io->context,stream->indices[i],&bytes,&size) ||
-           library_snapshot_overlap(bytes,size,frame,capacity) ||
-           !library_snapshot_content(meta,stream->indices[i],bytes,size)) return 0;
-        stream->sizes[i]=size; library_store_put(word,size);
-        if(!library_sha256_update(&hash,word,4) || !library_sha256_update(&hash,bytes,size)) return 0;
-        total+=4+size;
+    sink.context=&hash; sink.write=library_snapshot_hash; sink.count=0;
+    if(!library_snapshot_json(meta,&sink) || sink.count!=stream->metadata_length ||
+       !library_sha256_final(&hash,stream->metadata)) return 0;
+    if(stream->described && library_store_equal(stream->metadata,stream->described_metadata,32)) {
+        for(u32 i=0;i<stream->content_count;++i) stream->sizes[i]=stream->described_sizes[i];
+    } else {
+        u32 total=4+stream->metadata_length;
+        stream->described=0;
+        library_sha256_init(&hash);
+        u8 word[4]; library_store_put(word,stream->metadata_length);
+        if(!library_sha256_update(&hash,word,4)) return 0;
+        sink.context=&hash; sink.write=library_snapshot_hash; sink.count=0;
+        if(!library_snapshot_json(meta,&sink) || sink.count!=stream->metadata_length) return 0;
+        for(u32 i=0;i<stream->content_count;++i) {
+            const u8 *bytes; u32 size;
+            if(!io->load_content(io->context,stream->indices[i],&bytes,&size) ||
+               library_snapshot_overlap(bytes,size,frame,capacity) ||
+               !library_snapshot_content(meta,stream->indices[i],bytes,size)) return 0;
+            stream->sizes[i]=size; library_store_put(word,size);
+            if(!library_sha256_update(&hash,word,4) || !library_sha256_update(&hash,bytes,size)) return 0;
+            total+=4+size;
+        }
+        if(!library_sha256_final(&hash,stream->described_digest)) return 0;
+        for(u32 i=0;i<stream->content_count;++i) stream->described_sizes[i]=stream->sizes[i];
+        for(u32 i=0;i<32;++i) stream->described_metadata[i]=stream->metadata[i];
+        stream->described_total=total; stream->described=1;
     }
     for(u32 i=0;i<LIBRARY_STREAM_HEADER;++i) stream->header[i]=0;
     for(u32 i=0;i<4;++i) stream->header[i]=(u8)"GRS1"[i];
     for(u32 i=0;i<16;++i) stream->header[4+i]=token[i];
     for(u32 i=0;i<4;++i) library_store_put(stream->header+20+4*i,meta->epoch[i]);
     u32 card_length=0; while(meta->card_id[card_length]) ++card_length;
-    if(!library_sha256((const u8 *)meta->card_id,card_length,stream->header+36) || !library_sha256_final(&hash,stream->header+80)) return 0;
-    library_store_put(stream->header+68,meta->generation); library_store_put(stream->header+72,total);
+    if(!library_sha256((const u8 *)meta->card_id,card_length,stream->header+36)) return 0;
+    for(u32 i=0;i<32;++i) stream->header[80+i]=stream->described_digest[i];
+    library_store_put(stream->header+68,meta->generation); library_store_put(stream->header+72,stream->described_total);
     stream->started=now; stream->next=0; stream->active=1;
     if(library_snapshot_emit(stream,meta,io,now,frame,capacity,length)) return 1;
     stream->active=0; return 0;
@@ -185,10 +208,13 @@ static int library_snapshot_read(struct library_snapshot_stream *stream,const st
        !library_snapshot_live(stream,now,io) || !library_snapshot_request(stream,request,request_length)) return 0;
     return library_snapshot_emit(stream,meta,io,now,frame,capacity,length);
 }
+/* END releases the pin at any offset after BEGIN: a reader that already holds
+   the bytes of this digest stops early, and the remaining chunks are not read
+   from the card. */
 static int library_snapshot_end(struct library_snapshot_stream *stream,const struct library_snapshot_io *io,u32 now,const u8 *request,u32 length)
 {
     if(!stream || !io || !io->valid_pin || !library_snapshot_live(stream,now,io) ||
-       stream->next!=library_store_word(stream->header+72) || !library_snapshot_request(stream,request,length)) return 0;
+       !library_snapshot_request(stream,request,length)) return 0;
     stream->active=0; return 1;
 }
 #endif

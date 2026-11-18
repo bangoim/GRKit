@@ -39,7 +39,11 @@ struct library_resident {
     u32 nonce,phase,failure,transaction_kind,activation_crc;
     u32 transaction_token[4];
     char legacy_names[64][CATALOG_NAME_SIZE];
-
+    /* The manifest whose contents were last read and checked. While the
+       camera runs, only this owner's commits change those files, so the
+       same manifest needs no second read of every GRF. */
+    u32 verified;
+    u8 verified_manifest[32],manifest_digest[32];
 };
 _Static_assert(sizeof(struct library_resident)<=SERVICES_LIBRARY_OWNER_SIZE,"resident owner allocation");
 static int library_resident_card_unchanged(struct library_resident *state);
@@ -152,7 +156,9 @@ static int library_resident_contents(void *context,const u8 *bytes,u32 length)
 {
     struct library_resident *state=context;
     struct library_manifest manifest;
-    if(!library_resident_card_unchanged(state) || !library_resident_manifest(bytes,length,&manifest)) return 1;
+    if(!library_resident_card_unchanged(state) || !library_resident_manifest(bytes,length,&manifest) ||
+       !library_sha256(bytes,length,state->manifest_digest)) return 1;
+    if(state->verified && library_store_equal(state->manifest_digest,state->verified_manifest,32)) return 0;
     for(u32 i=0;i<manifest.entries;++i) {
         struct library_manifest_entry entry;
         library_manifest_get(&manifest,i,&entry);
@@ -166,7 +172,10 @@ static int library_resident_contents(void *context,const u8 *bytes,u32 length)
         int closed=state->owner.fs.close((u32)handle);
         if(failed || closed || count!=stat[2] || !library_content_matches(&entry,state->content,count,library_resident_grf)) return 1;
     }
-    return !library_resident_card_unchanged(state);
+    if(!library_resident_card_unchanged(state)) return 1;
+    for(u32 i=0;i<32;++i) state->verified_manifest[i]=state->manifest_digest[i];
+    state->verified=1;
+    return 0;
 }
 static void library_resident_legacy_path(const char *name,char path[32])
 {
@@ -620,7 +629,7 @@ A32_ENTRY u32 menu_library_owner(u32 array)
         struct library_owner_fs fs=library_owner_target_fs();
         if(!library_owner_init(&state->owner,&fs,state,library_owner_target_resident,library_resident_contents)) return CONTROL_INVALID;
         state->header=(u32)(__UINTPTR_TYPE__)h;
-        state->recovered=0; state->status=0; state->magic=0x4c4f574eU;
+        state->recovered=0; state->status=0; state->verified=0; state->magic=0x4c4f574eU;
     }
     if(state->header!=(u32)(__UINTPTR_TYPE__)h) return CONTROL_BAD_CONTEXT;
     u32 now;
