@@ -72,7 +72,20 @@ public class NshView extends android.widget.FrameLayout {
  public void runRustApp(String path) {}
  public boolean handleBack() { return false; }
  public void destroy() {}
+ public void registerComponent(String name, NshComponent.Factory factory) {}
 }''')
+        (stubs / "NshComponent.java").write_text('''package com.longbridge.nsh;
+public interface NshComponent {
+ android.view.View view();
+ void setProp(String name, Object value);
+ default void setAnimatedNumber(String name, double value) {}
+ default void setAnimatedColor(String name, int argb) {}
+ default void command(String name, Object args) {}
+ default void destroy() {}
+ interface Factory { NshComponent create(NshComponentContext context); }
+}''')
+        (stubs / "NshComponentContext.java").write_text('''package com.longbridge.nsh;
+public final class NshComponentContext {}''')
         (stubs / "DevActivity.java").write_text('''package com.longbridge.nsh;
 class DevActivity {
  static void edgeToEdge(android.app.Activity activity) {}

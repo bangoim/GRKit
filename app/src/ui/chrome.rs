@@ -14,6 +14,37 @@ pub const STEP1: ImageAsset = asset!("step1.jpg");
 pub const STEP2: ImageAsset = asset!("step2.jpg");
 pub const STEP3: ImageAsset = asset!("step3.jpg");
 
+/// The platform's own loader, which each platform registers as a native
+/// view: Android's indeterminate `ProgressBar` (`MainActivity`), iOS's
+/// `UIActivityIndicatorView` (`platform::ios::activity`).
+pub const ACTIVITY_COMPONENT: &str = "grkit/activity";
+
+/// The platform's loader in the tint color, `size` points square. Where no
+/// platform view exists (desktop runs, headless tests) a turning arc stands
+/// in for it.
+pub fn activity_indicator(size: f32) -> AnyElement {
+    if cfg!(any(target_os = "ios", target_os = "android")) {
+        let tint = token("tint");
+        native(ACTIVITY_COMPONENT)
+            .size(px(size))
+            .prop("light", serde_json::json!(tint.light.to_hex()))
+            .prop("dark", serde_json::json!(tint.dark.to_hex()))
+            .into_element()
+    } else {
+        view()
+            .size(px(size))
+            .text_color(move || token("tint"))
+            .child(
+                svg(nsh_core::element::ImageSrc::svg_markup(
+                    r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 3a9 9 0 1 1-9 9"/></svg>"#,
+                ))
+                .size(px(size))
+                .animate_spin(),
+            )
+            .into_element()
+    }
+}
+
 /// Minimum touch target for the current platform.
 pub fn touch_target() -> f32 {
     if cfg!(target_os = "android") {

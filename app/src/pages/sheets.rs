@@ -7,8 +7,9 @@ use crate::domain::{CameraModel, LinkError, UpdateError, UpdateKind, UpdatePhase
 use crate::store::{AppState, Sheet, link_error_body, link_error_title};
 use crate::strings::{format_bytes, tr};
 use crate::ui::{
-    STEP1, STEP2, STEP3, StepState, camera_art, checklist_row, connection_button, connection_icon,
-    secondary_button, sheet_primary_button, sheet_shell, sheet_surface, token, touch_target,
+    STEP1, STEP2, STEP3, StepState, activity_indicator, camera_art, checklist_row,
+    connection_button, connection_icon, secondary_button, sheet_primary_button, sheet_shell,
+    sheet_surface, token, touch_target,
 };
 
 pub fn overlay(app: AppState) -> impl IntoElement {
@@ -154,74 +155,129 @@ fn connection_shell(
         .child(body)
 }
 
+/// The indicator column of the connect checklist, after the camera app's:
+/// a faint circle while waiting, the platform loader for the step under
+/// way, and
+/// a filled check once done. Only the step that has just finished pops its
+/// check in; the sheet is drawn again at each step, and older checks stay
+/// still. The loader fades in when its step starts.
+const STEP_INDICATOR: f32 = 22.0;
+
+const CHECK: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 12.5l4.5 4.5L18.5 7.5"/></svg>"#;
+
+fn step_indicator(state: StepState, changed: bool) -> AnyElement {
+    let entering = |preset| motion().entering(preset);
+    match state {
+        StepState::Waiting => view()
+            .size(px(STEP_INDICATOR))
+            .rounded_full()
+            .border_2()
+            .border_color(move || theme().border)
+            .into_element(),
+        StepState::Current => {
+            let spinner = view()
+                .size(px(STEP_INDICATOR))
+                .items_center()
+                .justify_center()
+                .child(activity_indicator(STEP_INDICATOR));
+            if changed {
+                spinner
+                    .bind_motion(&entering(MotionPreset::FadeIn))
+                    .into_element()
+            } else {
+                spinner.into_element()
+            }
+        }
+        StepState::Done => {
+            let badge = view()
+                .size(px(STEP_INDICATOR))
+                .rounded_full()
+                .items_center()
+                .justify_center()
+                .bg(move || token("tint"))
+                .text_color(move || rgb(0xFFFFFF))
+                .child(svg(nsh_core::element::ImageSrc::svg_markup(CHECK)).size(px(12.0)));
+            if changed {
+                badge
+                    .bind_motion(&entering(MotionPreset::ZoomIn))
+                    .into_element()
+            } else {
+                badge.into_element()
+            }
+        }
+    }
+}
+
+/// The quiet full-width button of a sheet that nothing moves forward from.
+fn quiet_button(title: String, on_press: impl Fn() + 'static) -> impl IntoElement {
+    view()
+        .w_full()
+        .min_h(px(50.0))
+        .py_3()
+        .rounded_full()
+        .items_center()
+        .justify_center()
+        .bg(move || theme().muted)
+        .role(AccessibilityRole::Button)
+        .label(title.clone())
+        .on_press(on_press)
+        .active(|s| s.opacity(0.7))
+        .child(
+            text(title)
+                .text_size(px(16.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(move || theme().foreground),
+        )
+}
+
+/// One row of the connect checklist, after the camera app's: the
+/// indicator, a line down to the next step, and the step's name.
 fn connection_step(
     title: &str,
     subtitle: Option<&str>,
     state: StepState,
-    number: u8,
+    last: bool,
+    changed: bool,
 ) -> impl IntoElement {
     let current = matches!(state, StepState::Current);
-    let done = matches!(state, StepState::Done);
+    let opacity = match state {
+        StepState::Waiting => 0.4,
+        StepState::Current => 1.0,
+        StepState::Done => 0.6,
+    };
     view()
         .flex_row()
-        .items_center()
-        .gap_3()
-        .p_4()
-        .rounded(px(8.0))
-        .style_when(current, |s| s.bg(move || token("connection-selected")))
         .child(
             view()
-                .size(px(28.0))
-                .rounded_full()
+                .w(px(STEP_INDICATOR))
                 .items_center()
-                .justify_center()
-                .bg(move || {
-                    if done {
-                        token("success-soft")
-                    } else if current {
-                        token("connection-brand")
-                    } else {
-                        theme().muted
-                    }
-                })
-                .text_color(move || {
-                    if done {
-                        token("success")
-                    } else if current {
-                        rgb(0xFFFFFF).into()
-                    } else {
-                        theme().muted_foreground
-                    }
-                })
-                .child(if done {
-                    connection_icon("M5 12l4 4L19 6").into_element()
-                } else {
-                    text(number.to_string())
-                        .text_size(px(13.0))
-                        .line_height(px(18.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .into_element()
-                }),
+                .child(step_indicator(state, changed))
+                .child((!last).then(|| {
+                    view()
+                        .flex_1()
+                        .w(px(1.5))
+                        .min_h(px(12.0))
+                        .mt_1()
+                        .bg(move || theme().border)
+                })),
         )
         .child(
             view()
                 .flex_1()
+                .pl_3()
+                .pb_4()
                 .gap_1()
                 .child(
                     text(title.to_owned())
                         .text_size(px(16.0))
-                        .font_weight(if current {
-                            FontWeight::SEMIBOLD
-                        } else {
+                        .line_height(px(22.0))
+                        .font_weight(if matches!(state, StepState::Waiting) {
                             FontWeight::NORMAL
+                        } else {
+                            FontWeight::MEDIUM
                         })
-                        .text_color(move || {
-                            if current {
-                                theme().foreground
-                            } else {
-                                theme().muted_foreground
-                            }
-                        }),
+                        .text_color(move || theme().foreground)
+                        .opacity(opacity),
                 )
                 .child(subtitle.filter(|_| current).map(|s| {
                     text(s.to_owned())
@@ -359,10 +415,23 @@ fn scan(app: AppState) -> impl IntoElement {
 
 fn connecting(app: AppState, step: u8) -> impl IntoElement {
     let model = format!("RICOH {}", app.model_name());
+    // The last step stays under way until the sheet closes.
+    let state = |index: u8| {
+        if step > index && index < 2 {
+            StepState::Done
+        } else if step == index || (index == 2 && step > 2) {
+            StepState::Current
+        } else {
+            StepState::Waiting
+        }
+    };
+    // A step changed at this step: it just finished, or just started. The
+    // first step's start is the sheet's own entrance.
+    let changed = |index: u8| step == index + 1 || (step == index && index > 0);
     connection_shell(
         tr("connecting.title", &[("model", &model)]),
         Some(tr("connecting.keep_on", &[])),
-        true,
+        false,
         move || app.cancel_connect(),
         view()
             .w_full()
@@ -371,41 +440,29 @@ fn connecting(app: AppState, step: u8) -> impl IntoElement {
             .child(
                 view()
                     .w_full()
-                    .gap_1()
                     .child(connection_step(
                         &tr("connecting.bt", &[]),
                         None,
-                        if step > 0 {
-                            StepState::Done
-                        } else {
-                            StepState::Current
-                        },
-                        1,
+                        state(0),
+                        false,
+                        changed(0),
                     ))
                     .child(connection_step(
                         &tr("connecting.wifi", &[]),
                         Some(&tr("connecting.wifi_sub", &[])),
-                        if step > 1 {
-                            StepState::Done
-                        } else if step == 1 {
-                            StepState::Current
-                        } else {
-                            StepState::Waiting
-                        },
-                        2,
+                        state(1),
+                        false,
+                        changed(1),
                     ))
                     .child(connection_step(
                         &tr("connecting.version", &[]),
                         None,
-                        if step >= 2 {
-                            StepState::Current
-                        } else {
-                            StepState::Waiting
-                        },
-                        3,
+                        state(2),
+                        true,
+                        changed(2),
                     )),
             )
-            .child(secondary_button(tr("connecting.cancel", &[]), move || {
+            .child(quiet_button(tr("connecting.cancel", &[]), move || {
                 app.cancel_connect()
             })),
     )

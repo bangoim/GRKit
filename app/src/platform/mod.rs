@@ -7,6 +7,12 @@ mod ios;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod stub;
 
+/// Registers the app's native views on an iOS surface (`lib.rs`).
+#[cfg(target_os = "ios")]
+pub(crate) fn register_ios_components(components: &nsh_platform_ios::Components) {
+    ios::activity::register(components);
+}
+
 pub(crate) mod http;
 pub(crate) mod link_support;
 pub(crate) mod looks;

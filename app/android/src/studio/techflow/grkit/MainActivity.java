@@ -19,6 +19,7 @@ public final class MainActivity extends Activity {
                 development ? BuildConfig.RELEASE_PUBLIC_KEY : "");
         CameraBridge.initialize(this);
         view = new GrkitView(this);
+        view.registerComponent(ActivityIndicator.NAME, context -> new ActivityIndicator(this));
         setContentView(view);
         view.runRustApp("nsh");
     }

@@ -35,6 +35,13 @@ use nsh_core::prelude::*;
 
 use crate::store::AppState;
 
+/// The crate's native views on iOS: the platform loader
+/// (`ui::ACTIVITY_COMPONENT`). Android registers its own in `MainActivity`.
+#[native_components(ios)]
+fn components(components: &nsh_platform_ios::Components) {
+    platform::register_ios_components(components);
+}
+
 /// The crate's UI set (`nsh.json` `"rust"`, `"root": "App"`).
 #[native_module("grkit/native")]
 fn native(registry: &mut Registry) {
