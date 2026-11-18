@@ -93,7 +93,7 @@ pub async fn read_package(
     let url = format!("{base}/v1/props");
     app_info!("HTTP read props at {base}");
     let response = camera_get(url).await?;
-    if response.status() == 503 {
+    if crate::domain::should_retry_status(response.status()) {
         return Err(LinkError::CardNotReady);
     }
     if !response.ok() {

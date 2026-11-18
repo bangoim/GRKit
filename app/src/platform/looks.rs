@@ -19,7 +19,9 @@ use crate::domain::{
     parse_catalog, parse_looks,
 };
 
-const READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// The first Looks read after a start streams every Look from the card;
+/// later reads reuse it and take well under a second.
+const READ_TIMEOUT: Duration = Duration::from_secs(15);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long to follow an accepted (202) change before reading the Looks again.
 const RESULT_BUDGET: Duration = Duration::from_secs(30);

@@ -70,9 +70,11 @@ pub fn parse_package(body: &str) -> Result<PackageResponse, String> {
     serde_json::from_str(body).map_err(|e| e.to_string())
 }
 
-/// 503 means the card is not ready yet; keep retrying within the poll budget.
+/// 503 means the card or runtime is not ready or busy, and 409 that the
+/// card identity became known during the request; keep retrying within the
+/// poll budget.
 pub fn should_retry_status(status_code: u16) -> bool {
-    status_code == 503
+    matches!(status_code, 409 | 503)
 }
 
 /// Outcome of one `/v1/props` attempt (for the poll loop).
@@ -80,7 +82,7 @@ pub fn should_retry_status(status_code: u16) -> bool {
 pub enum StatusAttempt {
     /// Parsed a successful props body.
     Ready,
-    /// HTTP 503 — card not ready; retry.
+    /// HTTP 503 or 409: the card is not ready yet; retry.
     CardNotReady,
     /// Could not reach the service (connection refused, no route, etc.); retry.
     Unreachable,
@@ -263,6 +265,17 @@ mod tests {
     }
 
     #[test]
+    fn classifies_a_changed_card_context_as_retry() {
+        assert_eq!(
+            classify_props_response(
+                409,
+                r#"{"type":"about:blank","title":"Conflict","status":409,"code":"context_changed","detail":"The card changed while reading properties."}"#
+            ),
+            StatusAttempt::CardNotReady
+        );
+    }
+
+    #[test]
     fn classifies_ok_props_as_ready() {
         assert_eq!(
             classify_props_response(200, PROPS_READY),
@@ -335,6 +348,7 @@ mod tests {
     #[test]
     fn retries_only_503() {
         assert!(should_retry_status(503));
+        assert!(should_retry_status(409));
         assert!(!should_retry_status(200));
         assert!(!should_retry_status(404));
     }

@@ -115,7 +115,7 @@ pub async fn probe_props(timeout: Duration) -> Probe {
     };
     let status = response.status();
     let body = response.text();
-    if status == 503 {
+    if crate::domain::should_retry_status(status) {
         return Probe::CardNotReady;
     }
     if non_camera_answer(status, &body) {
