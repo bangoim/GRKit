@@ -4,12 +4,14 @@
 import argparse
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
+BRAND = ROOT.parent / "resources/brand/app/android"
 ANDROID = ROOT / "android"
 
 
@@ -113,8 +115,23 @@ class DevActivity {
             '<application android:label=', '<application android:debuggable="' + ("false" if args.release else "true") + '" android:label='))
         resources = work / "resources.zip"
         run(build_tools / "aapt2", "compile", "--dir", ANDROID / "res", "-o", resources)
+        # The launcher icon: the adaptive layers that resources/brand/build.py
+        # draws (432 px: 108 dp at xxxhdpi), so the app keeps no copy of them.
+        icon_res = work / "icon-res"
+        (icon_res / "mipmap-xxxhdpi").mkdir(parents=True)
+        (icon_res / "mipmap-anydpi").mkdir()
+        for layer in ("foreground", "background", "monochrome"):
+            shutil.copyfile(BRAND / f"{layer}.png", icon_res / "mipmap-xxxhdpi" / f"ic_launcher_{layer}.png")
+        (icon_res / "mipmap-anydpi" / "ic_launcher.xml").write_text(
+            '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n'
+            ' <background android:drawable="@mipmap/ic_launcher_background"/>\n'
+            ' <foreground android:drawable="@mipmap/ic_launcher_foreground"/>\n'
+            ' <monochrome android:drawable="@mipmap/ic_launcher_monochrome"/>\n'
+            '</adaptive-icon>\n')
+        icons = work / "icons.zip"
+        run(build_tools / "aapt2", "compile", "--dir", icon_res, "-o", icons)
         unsigned = work / "unsigned.apk"
-        run(build_tools / "aapt2", "link", resources, "--manifest", manifest, "-I", android_jar,
+        run(build_tools / "aapt2", "link", resources, icons, "--manifest", manifest, "-I", android_jar,
             "--min-sdk-version", "29", "--target-sdk-version", "35", "--version-code", str(metadata["build"]),
             "--version-name", metadata["version"], "-A", assets, "-o", unsigned)
         with zipfile.ZipFile(unsigned, "a") as apk, zipfile.ZipFile(runtime) as original:

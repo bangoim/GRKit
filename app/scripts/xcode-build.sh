@@ -63,3 +63,13 @@ buddy 'Add :ITSAppUsesNonExemptEncryption bool false' 2>/dev/null \
 buddy 'Delete :UIDeviceFamily' 2>/dev/null || true
 buddy 'Add :UIDeviceFamily array'
 buddy 'Add :UIDeviceFamily:0 integer 1'
+
+# The app icon: the Icon Composer bundle that resources/brand/build.py writes.
+# nsh.json names no icon, so the package has no asset catalog of its own and
+# actool writes the bundle's Assets.car.
+partial="$DERIVED_FILE_DIR/AppIcon-Info.plist"
+xcrun actool "$SRCROOT/../resources/brand/app/ios/AppIcon.icon" \
+  --compile "$TARGET_BUILD_DIR/$WRAPPER_NAME" --platform iphoneos \
+  --minimum-deployment-target "$IPHONEOS_DEPLOYMENT_TARGET" --target-device iphone \
+  --app-icon AppIcon --output-partial-info-plist "$partial" --output-format human-readable-text >/dev/null
+buddy "Merge $partial"
