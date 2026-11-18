@@ -54,6 +54,9 @@ fn en(key: &str) -> &'static str {
         "software.checking" => "Checking for updates…",
         "software.check" => "Check for Updates",
         "error.download_title" => "Could Not Prepare the Update",
+        "error.download_body" => {
+            "Could not download the update. Check the internet connection and try again."
+        }
         "error.service_title" => "Could Not Complete the Request",
         "installed.verified" => "The camera is running this version.",
         "roll.installed_subtitle" => "The camera is running the restored version.",
@@ -210,6 +213,7 @@ fn zh(key: &str) -> Option<&'static str> {
         "installed.verified" => "已确认相机正在运行此版本。",
         "error.service_title" => "无法完成请求",
         "error.download_title" => "无法准备更新",
+        "error.download_body" => "无法下载更新。请检查网络连接后重试。",
         "loading.camera" => "正在连接相机…",
         "loading.update" => "正在检查更新…",
         "tab.camera" => "相机",

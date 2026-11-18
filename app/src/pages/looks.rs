@@ -3,7 +3,7 @@
 use nsh_base::{nav_page, theme};
 use nsh_core::prelude::*;
 
-use crate::domain::{CameraModel, Look, LookFilter, LookGroup, LookSource, group_of};
+use crate::domain::{CameraModel, Look, LookError, LookFilter, LookGroup, LookSource, group_of};
 use crate::store::{AppState, CatalogItem, LooksView, Route, Sheet, Tab};
 use crate::strings::tr;
 use crate::ui::{
@@ -86,6 +86,15 @@ fn on_camera(app: AppState) -> AnyElement {
         return no_camera(app).into_element();
     }
     let Some(snapshot) = app.looks_snapshot() else {
+        if app.looks_error() == Some(LookError::NeedsFastStart) {
+            // Trying again does not help until the camera starts again.
+            return grouped_card(
+                view()
+                    .p_4()
+                    .child(text(tr("looks.needs_fast_start", &[])).text_size(px(17.0))),
+            )
+            .into_element();
+        }
         if app.looks_error().is_some() {
             return grouped_card(
                 view()

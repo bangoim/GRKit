@@ -354,6 +354,9 @@ error.service_title:
 error.download_title:
   en: "Could Not Prepare the Update"
   zh-CN: "无法准备更新"
+error.download_body:
+  en: "Could not download the update. Check the internet connection and try again."
+  zh-CN: "无法下载更新。请检查网络连接后重试。"
 
 software.check:
   en: "Check for Updates"
@@ -499,6 +502,9 @@ looks.pending_body:
 looks.read_failed:
   en: Could not read the looks on the camera.
   zh-CN: 无法读取相机上的效果。
+looks.needs_fast_start:
+  en: Fast start is needed to manage looks.
+  zh-CN: 需要快速启动才能管理效果。
 looks.retry:
   en: Try Again
   zh-CN: 重试
@@ -652,6 +658,9 @@ looks.error.lost_title:
 looks.error.lost_body:
   en: Reconnect to the camera and try again.
   zh-CN: 请重新连接相机后再试。
+looks.error.fast_start_title:
+  en: Fast Start Needed
+  zh-CN: 需要快速启动
 looks.error.not_ready_title:
   en: Camera Not Ready
   zh-CN: 相机未就绪

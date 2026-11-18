@@ -263,6 +263,9 @@ pub enum LookError {
     ConnectionLost,
     /// The card or runtime is not ready yet.
     NotReady,
+    /// The camera started without fast start, so its Looks cannot be
+    /// managed until it starts with it.
+    NeedsFastStart,
     /// Recipes or dial sets use the Look.
     InUse,
     /// Deleting the Look in use needs the camera to switch to Off.
@@ -294,6 +297,7 @@ impl LookError {
         match self {
             LookError::ConnectionLost => ("looks.error.lost_title", "looks.error.lost_body"),
             LookError::NotReady => ("looks.error.not_ready_title", "looks.error.not_ready_body"),
+            LookError::NeedsFastStart => ("looks.error.fast_start_title", "looks.needs_fast_start"),
             LookError::InUse => ("looks.error.in_use_title", "looks.error.in_use_body"),
             LookError::ActiveLook => ("looks.error.active_title", "looks.error.active_body"),
             LookError::OfficialReadOnly => {
@@ -341,6 +345,7 @@ pub fn look_error(status: u16, body: &str) -> LookError {
         "invalid_name" => return LookError::InvalidName,
         "look_not_found" => return LookError::NotFound,
         "card_unavailable" | "runtime_unavailable" => return LookError::NotReady,
+        "runtime_protocol_unsupported" => return LookError::NeedsFastStart,
         _ => {}
     }
     match status {

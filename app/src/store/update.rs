@@ -66,7 +66,12 @@ impl AppState {
                             });
                             self.release.with(|slot| *slot.borrow_mut() = Some(release));
                         }
-                        Err(message) => self.release_error.set(Some(message)),
+                        Err(message) => {
+                            // The detail is for the log, not for the person.
+                            log::warn!("Release check failed: {message}");
+                            self.release_error
+                                .set(Some(crate::strings::tr("software.unavailable", &[])));
+                        }
                     }
                 }
                 self.release_busy.set(false);
@@ -191,9 +196,10 @@ impl AppState {
             )
             .await
             {
-                futures_util::future::Either::Left((result, _)) => {
-                    result.map_err(UpdateError::Download)?
-                }
+                futures_util::future::Either::Left((result, _)) => result.map_err(|message| {
+                    log::warn!("Release download failed: {message}");
+                    UpdateError::Download(crate::strings::tr("error.download_body", &[]))
+                })?,
                 futures_util::future::Either::Right(_) => {
                     self.dismiss_error();
                     return Ok(());
