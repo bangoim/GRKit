@@ -142,7 +142,9 @@ impl AppState {
         }
     }
 
-    /// The camera is gone. Keep its nearby prompt away for this power-on.
+    /// The camera is gone. Keep its nearby prompt away for this power-on and
+    /// give up the Bluetooth link the connect kept: a camera on an open link
+    /// does not advertise, so the nearby watch could not see it power on again.
     fn mark_link_down(self) {
         if let Some(mut status) = self.status.get() {
             status.camera.connection = ConnectionState::Disconnected;
@@ -150,6 +152,9 @@ impl AppState {
         }
         if let Some(remembered) = self.remembered.get() {
             self.suppress_nearby(&remembered.peripheral_id);
+            if self.connect_started.get().is_none() {
+                platform::release_link(&remembered.peripheral_id);
+            }
         }
     }
 

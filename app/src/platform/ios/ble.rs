@@ -601,6 +601,12 @@ pub fn resume_scanning() {
     });
 }
 
+/// The camera session ended: drop the link the connect kept, so the camera
+/// advertises again and the nearby watch sees it power off and on.
+pub fn release_link(peripheral_id: &str) {
+    cancel_connection(peripheral_id);
+}
+
 pub fn stop_scanning() {
     SCAN_WANTED.store(false, Ordering::SeqCst);
     *shared().nearby_tx.lock().unwrap() = None;

@@ -157,6 +157,24 @@ pub fn stop_scanning() {
     }
 }
 
+/// The camera session ended: drop the Bluetooth link the connect kept, so the
+/// camera advertises again and the nearby watch sees it power off and on.
+/// The camera's access point and the phone's Wi-Fi are left as they are.
+pub fn release_link(peripheral_id: &str) {
+    #[cfg(target_os = "ios")]
+    {
+        ios::ble::release_link(peripheral_id);
+    }
+    #[cfg(target_os = "android")]
+    {
+        android::release_link(peripheral_id);
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        let _ = peripheral_id;
+    }
+}
+
 /// Full connect: BLE wake + Wi-Fi join + status/package, or HTTP-only when `GRKIT_CAMERA_URL` is set.
 pub async fn connect_camera(
     peripheral_id: &str,

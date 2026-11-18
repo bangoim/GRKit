@@ -32,8 +32,15 @@ public final class CameraBridge {
     private static final int BLE_CONNECT_TIMEOUT_RETRIES = 1;
     /** The longest a read the camera refused for want of pairing waits for the system pairing dialog. */
     private static final long PAIRING_WAIT_MS = 90_000;
-    /** The longest a Wi-Fi join waits for the system to bring up the camera network. */
+    /**
+     * The longest a Wi-Fi join waits for the system to bring up the camera
+     * network, in foreground time: the system activity that searches for the
+     * network and asks the user covers the app, and that time does not count.
+     */
     private static final long JOIN_TIMEOUT_MS = 30_000;
+    private static final long JOIN_POLL_MS = 250;
+    /** The activity is in front: no system dialog covers it. */
+    private static volatile boolean resumed;
     // Forced reassociation: the least wait after dropping the camera network,
     // the poll interval, and the bound on the wait for the network to go away.
     private static final long REASSOCIATE_SETTLE_MIN_MS = 1_000;
@@ -110,7 +117,12 @@ public final class CameraBridge {
     }
 
     public static void onResume() {
+        resumed = true;
         resumeScan();
+    }
+
+    public static void onPause() {
+        resumed = false;
     }
 
     private static void resumeScan() {
@@ -151,12 +163,13 @@ public final class CameraBridge {
             return;
         }
         if (operation.equals("scan") || operation.equals("stopScan") || operation.equals("cancel")
-                || operation.equals("finish")) {
+                || operation.equals("finish") || operation.equals("release")) {
             MAIN.post(() -> {
                 try {
                     if (operation.equals("scan")) { wantsScan = true; startScan(); }
                     else if (operation.equals("stopScan")) { wantsScan = false; stopScan(); }
                     else if (operation.equals("finish")) finish();
+                    else if (operation.equals("release")) releaseLink();
                     else cancel(new JSONObject(json).optBoolean("teardown"));
                     complete(id, "null", null);
                 } catch (Exception error) { complete(id, null, errorName(error)); }
@@ -679,7 +692,7 @@ public final class CameraBridge {
             networkCallback = callback;
             manager.requestNetwork(request, callback);
         }
-        try { ready.get(JOIN_TIMEOUT_MS, TimeUnit.MILLISECONDS); checkAttempt(attempt); }
+        try { awaitJoin(ready, attempt); checkAttempt(attempt); }
         catch (Exception error) {
             synchronized (CameraBridge.class) {
                 if (networkCallback == callback) releaseNetwork();
@@ -687,6 +700,24 @@ public final class CameraBridge {
             if (error instanceof TimeoutException) throw new Failure("WifiJoinTimeout");
             throw error;
         } finally { if (joining == ready) joining = null; }
+    }
+
+    /**
+     * Wait for the camera network for JOIN_TIMEOUT_MS of foreground time.
+     * While the system dialog covers the app, the wait does not count down.
+     */
+    private static void awaitJoin(CompletableFuture<Network> ready, long attempt) throws Exception {
+        long counted = 0;
+        long last = SystemClock.elapsedRealtime();
+        while (true) {
+            try { ready.get(JOIN_POLL_MS, TimeUnit.MILLISECONDS); return; }
+            catch (TimeoutException ignored) { /* Still joining. */ }
+            checkAttempt(attempt);
+            long now = SystemClock.elapsedRealtime();
+            if (resumed) counted += now - last;
+            last = now;
+            if (counted >= JOIN_TIMEOUT_MS) throw new TimeoutException();
+        }
     }
 
     /**
@@ -765,6 +796,20 @@ public final class CameraBridge {
     /** The attempt succeeded: scanning resumes if the app still wants results. */
     private static void finish() {
         connecting = false;
+        if (wantsScan) startScan();
+    }
+
+    /**
+     * The camera session ended: drop the Bluetooth link the connect kept, so
+     * the camera advertises again. A camera on an open link does not
+     * advertise, and the nearby watch would never see it power on. The
+     * access point and the camera network stay as they are.
+     */
+    private static void releaseLink() {
+        if (connecting) return;
+        Session old = session;
+        session = null;
+        if (old != null) old.close();
         if (wantsScan) startScan();
     }
 

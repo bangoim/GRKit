@@ -30,6 +30,12 @@ public final class MainActivity extends Activity {
     }
 
     @Override
+    protected void onPause() {
+        CameraBridge.onPause();
+        super.onPause();
+    }
+
+    @Override
     public void onConfigurationChanged(Configuration configuration) {
         super.onConfigurationChanged(configuration);
         GrkitView.updateSystemBars(this);

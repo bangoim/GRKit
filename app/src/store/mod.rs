@@ -396,7 +396,11 @@ impl AppState {
     fn publish_nearby(self) {
         let list = self.nearby_watch.with(|w| w.borrow().sightings().to_vec());
         self.nearby.set(list);
-        if self.sheet().is_some() || self.status().is_some() {
+        // Only an idle, disconnected app offers a camera.
+        let connected = self
+            .status()
+            .is_some_and(|s| s.camera.connection == ConnectionState::Connected);
+        if self.sheet().is_some() || connected || self.connect_started.get().is_some() {
             return;
         }
         let remembered = self.remembered.get().map(|r| r.peripheral_id);

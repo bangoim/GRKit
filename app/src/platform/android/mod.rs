@@ -248,6 +248,9 @@ pub fn stop_scanning() {
     *lock(&SCANS) = None;
     let _ = dispatch(0, "stopScan", json!({}));
 }
+pub fn release_link(_peripheral_id: &str) {
+    let _ = dispatch(0, "release", json!({}));
+}
 pub fn watch_disconnects(tx: Sender<String>) {
     *lock(&DISCONNECTS) = Some(tx);
 }
