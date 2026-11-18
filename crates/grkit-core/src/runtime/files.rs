@@ -108,6 +108,19 @@ pub fn core_path_of(index: usize, count: usize) -> String {
     }
 }
 
+/// The core file that `scan`, the SCAN.SH of a package, runs to scan: the
+/// first core file of the package (`core_path_of(0, count)`). Another core
+/// file on the card, such as one left from an earlier package, is not one
+/// that the package uses.
+pub fn scanned_core(scan: &[u8]) -> Option<String> {
+    let scan = std::str::from_utf8(scan).ok()?;
+    let prefix = format!("{LINUX_DIRECTORY}/");
+    scan.lines().find_map(|line| {
+        let name = line.strip_prefix(&prefix)?.strip_suffix(" --scan")?;
+        (!name.is_empty() && !name.contains('/')).then(|| format!("{PACKAGE_FOLDER}/{name}"))
+    })
+}
+
 /// The runtime files of a package with the core file of each runtime build of
 /// a camera, in release order, for `icon_stride`-byte icon slots. The builds of
 /// a camera have the same scripts and plan, so the first core file scans.
@@ -253,4 +266,21 @@ pub fn package_runtime_files_with(binaries: &[&[u8]], fast: &Files, icon_stride:
         files.insert(release.install_path(), install);
     }
     files
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_scan_script_names_the_first_core_file() {
+        let binary: &[u8] = b"core";
+        for count in [1, 2, MAX_CORE_FILES] {
+            let files = package_runtime_files(&vec![binary; count], ICON_STRIDE);
+            let scan = &files[SCAN_FILE];
+            assert_eq!(scanned_core(scan), Some(core_path_of(0, count)));
+        }
+        assert_eq!(scanned_core(b"echo\n"), None);
+        assert_eq!(scanned_core(&[0xff, 0xfe]), None);
+    }
 }

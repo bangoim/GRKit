@@ -23,9 +23,9 @@ use grkit_core::{
     camera::{Camera, CAMERAS},
     card::{
         BACKUP_FOLDER, BACKUP_RECORD, DRAFT_FILE, JOURNAL_FILE, MODULES_FOLDER, PACKAGE_FOLDER,
-        PACKAGE_LIST, REQUEST_FILE, STARTUP_FILE, UPDATE_FOLDER, VERSION_FILE,
+        PACKAGE_LIST, REQUEST_FILE, SCAN_FILE, STARTUP_FILE, UPDATE_FOLDER, VERSION_FILE,
     },
-    packaging, release,
+    packaging, release, runtime,
     runtime::update::{journal, rollback_journal, update_paths, Change},
     Files,
 };
@@ -1072,14 +1072,10 @@ fn changes(live: &Files, new: &Files, live_startup: Option<&[u8]>) -> Vec<Change
 
 /// The GRKit version that the core files of the package files `files` name.
 fn version_of(files: &Files) -> Option<String> {
-    files
-        .iter()
-        .filter(|(path, _)| {
-            path.strip_prefix(&format!("{PACKAGE_FOLDER}/CORE"))
-                .is_some_and(|rest| rest.ends_with(".BIN") && !rest.contains('/'))
-        })
-        .find_map(|(_, binary)| packaging::marked_version(binary))
-        .map(str::to_owned)
+    // Only the core file that the package's SCAN.SH runs: a core file left
+    // on the card by an earlier package names that package's version.
+    let core = runtime::scanned_core(files.get(SCAN_FILE)?)?;
+    packaging::marked_version(files.get(&core)?).map(str::to_owned)
 }
 
 /// The version file of the package files `files` (`card::VERSION_FILE`).
@@ -1947,13 +1943,19 @@ mod tests {
             let mut binary = testing::installer();
             binary
                 .extend_from_slice(format!("{}{version}\0", packaging::VERSION_MARKER).as_bytes());
-            Files::from([("SCRIPT/GRKIT/CORE1.BIN".to_owned(), binary)])
+            runtime::package_runtime_files(&[&binary, &binary], runtime::ICON_STRIDE)
         };
         assert_eq!(version_file(&core("1.7.0")), b"010700");
         assert_eq!(version_file(&core("12.3.45")), b"120345");
         assert_eq!(version_file(&core("1.7")), b"000000");
         assert_eq!(version_file(&core("100.0.0")), b"000000");
         assert_eq!(version_file(&Files::new()), b"000000");
+        // A core file left by an earlier package does not name the version.
+        let mut left = core("1.7.0");
+        let mut old = testing::installer();
+        old.extend_from_slice(format!("{}1.6.2\0", packaging::VERSION_MARKER).as_bytes());
+        left.insert(format!("{PACKAGE_FOLDER}/CORE.BIN"), old);
+        assert_eq!(version_file(&left), b"010700");
         let (_dir, card) = card_with(&package(&["test-effect"]));
         stage(&card, &package(&["other-effect"]), &gr3(), &keys()).unwrap();
         assert_eq!(read(&card, VERSION_FILE).unwrap(), b"010700");
