@@ -1,3 +1,13 @@
+## 1.6.4 (2026-11-18)
+
+### Fixes
+
+- In ADJ, OK on a GRKit value returns to the GRKit list instead of closing ADJ, and Left or Right keeps the highlighted value.
+- With the fast-boot firmware, GRKit loads faster from exFAT cards that a Mac copied files to.
+- With the fast-boot firmware, a camera whose fast start fails loads GRKit the normal way from the next power-on.
+- On GR III and GR IIIx, RAW development has a GRKit row that sets Grain, Glow, Border, and Date for that development only.
+- The RAW development preview keeps the Border color with Shading or Clarity, and puts the Shading vignette in the middle of the picture.
+
 ## 1.6.3 (2026-11-17)
 
 ### Fixes
