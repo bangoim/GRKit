@@ -68,6 +68,12 @@ fn failure(response: &HttpResponse) -> LookError {
 pub async fn list() -> Result<LooksSnapshot, LookError> {
     let response = request("GET", "/v1/looks", Vec::new(), READ_TIMEOUT, &[]).await?;
     if !response.ok() {
+        let body = response.text();
+        log::warn!(
+            "GET /v1/looks: HTTP {}: {}",
+            response.status(),
+            body.chars().take(400).collect::<String>()
+        );
         return Err(failure(&response));
     }
     parse_looks(&response.body).map_err(LookError::Service)
