@@ -56,13 +56,20 @@ int main(void) {
     assert(!control_submit(&box,epoch,1,9,content,1));
     assert(control_release(&box,sequence));
 
-    /* App must leave resident library work unclaimed. */
+    /* With a resident owner, App must leave library work unclaimed. */
+    box.owner_entry=0x540c3528u;
     assert(control_submit(&box,epoch,GRKIT_CONTROL_SNAPSHOT_BEGIN,9,0,0)==2);
     assert(!control_poll_once(&box,&candidate));
     assert(box.claimed==1 && box.ready==1);
     assert(control_acquire(&box,epoch,&candidate)==CONTROL_ACCEPTED);
     assert(control_complete(&box,2,CONTROL_UNSUPPORTED,9));
     assert(control_release(&box,2));
+    /* Without one, App answers it as unsupported, so the slot is freed. */
+    box.owner_entry=0;
+    assert(control_submit(&box,epoch,GRKIT_CONTROL_CARD_IDENTITY,9,0,0)==3);
+    assert(control_poll_once(&box,&candidate));
+    assert(box.ready==3 && box.result==CONTROL_UNSUPPORTED);
+    assert(control_release(&box,3));
     /* Reset only inside this isolated contract fixture. */
     box.request=box.ready=box.release=box.claimed=1;
 

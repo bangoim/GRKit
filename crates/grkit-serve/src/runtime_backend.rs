@@ -226,6 +226,10 @@ pub struct ControlBackend<M: crate::control::MailboxIo> {
     official_hashes: BTreeMap<String, String>,
     pending_receipt: Option<PendingReceipt>,
     pending_read: Option<crate::control::Ticket>,
+    /// The owner's answer to the card identity probe, kept for the session:
+    /// removing the card powers the camera off, so the card cannot change
+    /// while the service runs, and each probe reads the card.
+    card_identity: Option<Result<String>>,
 }
 struct PendingReceipt {
     before: RuntimeSnapshot,
@@ -265,6 +269,7 @@ impl<M: crate::control::MailboxIo> ControlBackend<M> {
             official_hashes: BTreeMap::new(),
             pending_receipt: None,
             pending_read: None,
+            card_identity: None,
         }
     }
     pub fn transport_verified(&self) -> bool {
@@ -581,7 +586,19 @@ impl<M: crate::control::MailboxIo + Send> RuntimeBackend for ControlBackend<M> {
                 } else { error }
             });
         }
-        self.read_card_identity()
+        if let Some(known) = &self.card_identity {
+            return known.clone();
+        }
+        let result = self.read_card_identity();
+        // Keep an identity, or a runtime that cannot probe the card; probe
+        // again after any other error.
+        if result.as_ref().map_or_else(
+            |error| error.code == "runtime_protocol_unsupported",
+            |_| true,
+        ) {
+            self.card_identity = Some(result.clone());
+        }
+        result
     }
 
     fn capabilities(&self) -> RuntimeCapabilities {
@@ -1557,6 +1574,32 @@ mod bridge_tests {
         assert_eq!(result.manifest, Manifest::default());
     }
 
+    #[test]
+    fn the_card_is_probed_once_per_session() {
+        use grkit_core::abi::*;
+        // The scripted mailbox panics on a request it has no reply for.
+        let memory = ScriptedMailbox::new(vec![
+            (CONTROL_PING, 0, vec![]),
+            (CONTROL_CARD_IDENTITY, 0, identity_evidence()),
+        ]);
+        let mut backend =
+            ControlBackend::new(crate::control::Client::new(memory).unwrap(), [3; 16]);
+        for _ in 0..3 {
+            assert_eq!(backend.card_identity().unwrap(), card_id());
+        }
+        let memory = ScriptedMailbox::new(vec![
+            (CONTROL_PING, 0, vec![]),
+            (CONTROL_CARD_IDENTITY, CONTROL_UNSUPPORTED, vec![]),
+        ]);
+        let mut backend =
+            ControlBackend::new(crate::control::Client::new(memory).unwrap(), [3; 16]);
+        for _ in 0..3 {
+            assert_eq!(
+                backend.card_identity().unwrap_err().code,
+                "runtime_protocol_unsupported"
+            );
+        }
+    }
     #[test]
     fn unsupported_owner_never_becomes_an_empty_successful_snapshot() {
         use grkit_core::abi::*;

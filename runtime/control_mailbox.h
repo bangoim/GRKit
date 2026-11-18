@@ -216,9 +216,13 @@ static u32 control_poll_once(volatile struct control_mailbox *box,struct control
     u32 epoch[4], nonce[4], i, any=0, attached=0, result;
     for(i=0;i<4;++i) { epoch[i]=box->epoch[i]; attached|=epoch[i]; }
     /* The resident owner is the sole consumer of library requests. App must
-       not claim them before the owner can perform asynchronous file I/O. */
+       not claim them before the owner can perform asynchronous file I/O.
+       Without an owner (a boot that did not take the fast path never sets
+       owner_entry), App answers them as unsupported, so that the one request
+       slot is not held forever. */
     CONTROL_INVALIDATE(&box->request,64);
-    if(box->command>=GRKIT_CONTROL_SNAPSHOT_BEGIN && box->command<=GRKIT_CONTROL_CARD_IDENTITY) return 0;
+    if(box->owner_entry && box->command>=GRKIT_CONTROL_SNAPSHOT_BEGIN &&
+       box->command<=GRKIT_CONTROL_CARD_IDENTITY) return 0;
     result=control_acquire(box,epoch,candidate);
     if(result==CONTROL_EMPTY) return 0;
     if(result==CONTROL_ACCEPTED) {

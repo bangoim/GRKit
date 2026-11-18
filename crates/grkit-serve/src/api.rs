@@ -228,7 +228,7 @@ impl Service {
         Ok(identity)
     }
 
-    /// Called by the monitor even when no HTTP snapshot is requested.
+    /// Records the card a request found; a change resets the Looks session.
     pub fn observe_card(&self, card_id: Option<String>) -> Result<(), Problem> {
         let mut verified = self.verified_card.lock().map_err(|_| {
             Problem::new(
@@ -268,7 +268,7 @@ impl Service {
         }
         Ok(())
     }
-    /// The monitor calls this under the same card transaction lock as HTTP.
+    /// Called under the card transaction lock of the HTTP request.
     pub fn observe_software(&self, card: &crate::update::Card) -> anyhow::Result<()> {
         let Some(request) = card.software_request()? else {
             return Ok(());

@@ -66,32 +66,9 @@ fn main() -> ExitCode {
     );
     let service = Arc::new(Service::with_runtime_backend(boot_id, Box::new(backend)));
     let card_access = Arc::new(Mutex::new(()));
-    let monitor = Arc::clone(&service);
-    let monitor_card = Arc::clone(&card_access);
-    if thread::Builder::new()
-        .name("grkit-card".into())
-        .spawn(move || {
-            let card = Card::new(grkit_core::card::LINUX_CARD);
-            loop {
-                if let Ok(_guard) = monitor_card.try_lock() {
-                    if matches!(
-                        monitor.poll_card_identity(std::path::Path::new(
-                            grkit_core::card::LINUX_CARD,
-                        )),
-                        Ok(Some(_))
-                    ) {
-                        // A retained query namespace alone does not authenticate
-                        // software state read from the currently mounted medium.
-                        let _ = monitor.observe_software(&card);
-                    }
-                }
-                thread::sleep(Duration::from_secs(1));
-            }
-        })
-        .is_err()
-    {
-        return ExitCode::FAILURE;
-    }
+    // No background work: the card cannot change while the service runs
+    // (removing it powers the camera off), so each request reads what it
+    // needs, and an idle service does not wake the card.
     let connections = Arc::new(AtomicUsize::new(0));
     let upload = Arc::new(Mutex::new(()));
     loop {
