@@ -37,6 +37,31 @@ const PEER_TIMEOUT: Duration = IDLE_TIMEOUT;
 const ACCEPT_PAUSE: Duration = Duration::from_millis(500);
 /// The argument of the copy that runs from RAM.
 const FROM_RAM: &str = "--from-ram";
+/// How long a request waits while another one reads or writes the card.
+const CARD_WAIT: Duration = Duration::from_secs(3);
+
+/// Waits for the card for at most `CARD_WAIT`. Concurrent requests of one
+/// client (for example a page that reads several resources) then queue
+/// instead of failing; a long write answers a retryable 503.
+fn lock_card(card_access: &Mutex<()>) -> Result<std::sync::MutexGuard<'_, ()>, Reply> {
+    let deadline = std::time::Instant::now() + CARD_WAIT;
+    loop {
+        match card_access.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => return Ok(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(Reply::problem(grkit_serve::protocol::Problem::new(
+                    503,
+                    "card_busy",
+                    "Another request is using the card. Try again.",
+                )))
+            }
+        }
+    }
+}
 
 fn main() -> ExitCode {
     // Elsewhere, such as on a development computer, the service runs in place.
@@ -180,12 +205,6 @@ fn serve(
             let mut body = bytes.split_off(head_end(&bytes).unwrap_or(bytes.len()));
             body.truncate(request.length);
             let rest = request.length - body.len();
-            Read::by_ref(&mut reader)
-                .take(rest as u64)
-                .read_to_end(&mut body)?;
-            if body.len() < request.length {
-                return Err(io::ErrorKind::UnexpectedEof.into());
-            }
             let card = Card::new(grkit_core::card::LINUX_CARD);
             let env = Env {
                 files: &System,
@@ -193,14 +212,49 @@ fn serve(
                 card: &card,
                 device: &device,
             };
+            // Answer a software request that cannot succeed before its package
+            // arrives: the camera then neither receives nor hashes it.
+            let continues = request
+                .headers
+                .get("expect")
+                .is_some_and(|value| value.eq_ignore_ascii_case("100-continue"));
+            if rest > 0 {
+                let early = match lock_card(card_access) {
+                    Ok(_guard) => service.precheck(&request, &env),
+                    Err(busy) => Some(busy),
+                };
+                if let Some(reply) = early {
+                    reader.get_mut().write_all(&reply.to_bytes())?;
+                    if !continues {
+                        // A client that sends without waiting reads the answer
+                        // after its upload; drop the bytes instead of resetting.
+                        io::copy(
+                            &mut Read::by_ref(&mut reader).take(rest as u64),
+                            &mut io::sink(),
+                        )?;
+                    }
+                    return reader.get_mut().shutdown(Shutdown::Both);
+                }
+                if continues {
+                    reader
+                        .get_mut()
+                        .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")?;
+                }
+            }
+            Read::by_ref(&mut reader)
+                .take(rest as u64)
+                .read_to_end(&mut body)?;
+            if body.len() < request.length {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
             if request.path == "/v1/ping" {
                 service.handle(&request, &body, &env)
             } else {
                 // The existing update journal cannot be read midway through
                 // staging, nor can cancellation race its writer.
-                match card_access.try_lock() {
+                match lock_card(card_access) {
                     Ok(_guard) => service.handle(&request, &body, &env),
-                    Err(_) => Response::error(409, "The card is busy").into(),
+                    Err(busy) => busy,
                 }
             }
         }

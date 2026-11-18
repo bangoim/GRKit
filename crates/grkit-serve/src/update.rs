@@ -91,6 +91,8 @@ pub enum SoftwareStatus {
     Running,
     Succeeded,
     Cancelled,
+    /// Ended without a change of the installed software; `error` says why.
+    Failed,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,7 +116,17 @@ pub struct SoftwareRequest {
     pub cancellable: bool,
     pub expected: SoftwareIdentity,
     pub before: SoftwareIdentity,
+    /// The code of a failed request. Absent from other checkpoints, so that
+    /// their bytes and checksums stay as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
+
+/// The camera deleted the request that waited for the confirmation on the
+/// camera: nobody confirmed it in time.
+pub const CONFIRMATION_EXPIRED: &str = "confirmation_expired";
+/// The journal of the request did not reach the card.
+pub const STAGING_FAILED: &str = "staging_failed";
 
 #[derive(Clone, Debug)]
 pub struct SoftwareContext {
@@ -136,8 +148,10 @@ impl SoftwareRequest {
             && valid_context_id(&self.card_id)
             && self.expected.valid()
             && self.before.valid()
+            && self.error.is_some() == (self.status == SoftwareStatus::Failed)
+            && self.error.as_deref().is_none_or(valid_context_id)
             && match self.status {
-                SoftwareStatus::Succeeded | SoftwareStatus::Cancelled => {
+                SoftwareStatus::Succeeded | SoftwareStatus::Cancelled | SoftwareStatus::Failed => {
                     self.phase == SoftwarePhase::Completed && !self.cancellable
                 }
                 SoftwareStatus::Running => {
@@ -264,6 +278,21 @@ impl Card {
             }
         }
         Ok(files)
+    }
+
+    /// The camera deletes an unconfirmed request on its own side. Linux then
+    /// keeps the names that it created (COMMIT.REQ, COMMIT.VER) and answers
+    /// an I/O error for them, and a rename onto such a name fails. Drop the
+    /// kernel's cached names when one of `paths` answers so.
+    fn forget_deleted(&self, paths: &[&str]) {
+        let stale = paths.iter().any(|path| {
+            fs::symlink_metadata(self.path(path))
+                .is_err_and(|error| error.kind() != std::io::ErrorKind::NotFound)
+        });
+        if stale {
+            // 2: free the cached names and file nodes, not file contents.
+            let _ = fs::write("/proc/sys/vm/drop_caches", "2");
+        }
     }
 
     /// Looks up `paths`, so that the card finds them after a delete in their
@@ -476,12 +505,26 @@ impl Card {
                 } else if request.phase == SoftwarePhase::Cancelling && actual == request.before {
                     request.status = SoftwareStatus::Cancelled;
                     request.phase = SoftwarePhase::Completed;
+                } else if request.phase == SoftwarePhase::AwaitingConfirmation
+                    && actual == request.before
+                {
+                    // Only the camera removes a request that it did not
+                    // confirm (after its confirmation time), and the
+                    // installed software is unchanged.
+                    request.status = SoftwareStatus::Failed;
+                    request.phase = SoftwarePhase::Completed;
+                    request.error = Some(CONFIRMATION_EXPIRED.into());
                 } else {
                     request.phase = SoftwarePhase::Recovering;
                 }
                 request.cancellable = false;
                 if request.status != SoftwareStatus::Running {
                     self.append_request(request.clone())?;
+                    // No journal refers to the update folder any more. It
+                    // holds the files that a rollback put aside, or a package
+                    // that nobody confirmed: free their space now instead of
+                    // at the next update.
+                    let _ = self.clear(UPDATE_FOLDER);
                 }
             }
         }
@@ -696,13 +739,17 @@ pub fn stage_rollback_request_with_keys(
         cancellable: true,
         expected,
         before,
+        error: None,
     };
-    stage_rollback_inner(
+    if let Err(error) = stage_rollback_inner(
         card,
         rollback,
         availability.version.as_deref(),
         Some(&request),
-    )?;
+    ) {
+        fail_unstaged(card, &request.request_id);
+        return Err(error);
+    }
     card.software_request()?
         .context("The rollback request was not retained")
 }
@@ -987,6 +1034,7 @@ fn stage_rollback_inner(
     request: Option<&SoftwareRequest>,
 ) -> Result<Value> {
     let journal = rollback_journal(&rollback.changes)?;
+    card.forget_deleted(&[VERSION_FILE, DRAFT_FILE, REQUEST_FILE]);
     card.warm([VERSION_FILE, DRAFT_FILE, REQUEST_FILE]);
     card.clear(UPDATE_FOLDER)?;
     card.write_checked(VERSION_FILE, &version_digits(version))?;
@@ -1120,9 +1168,36 @@ pub fn stage_request(
             "Recover the previous software request before writing"
         );
     }
-    stage_inner(card, zip, device, keys, Some(context))?;
+    if let Err(error) = stage_inner(card, zip, device, keys, Some(context)) {
+        fail_unstaged(card, &context.request_id);
+        return Err(error);
+    }
     card.software_request()?
         .context("The software request was not retained")
+}
+
+/// A request whose journal never reached the card did not wait for a
+/// confirmation: record its own failure, so that it does not read as one
+/// that the camera let expire.
+fn fail_unstaged(card: &Card, request_id: &str) {
+    if card.state().ok() != Some("none") {
+        return;
+    }
+    let Ok(Some(mut request)) = card
+        .read_record()
+        .map(|record| record.and_then(|r| r.request))
+    else {
+        return;
+    };
+    if request.request_id.eq_ignore_ascii_case(request_id)
+        && request.status == SoftwareStatus::Running
+    {
+        request.status = SoftwareStatus::Failed;
+        request.phase = SoftwarePhase::Completed;
+        request.cancellable = false;
+        request.error = Some(STAGING_FAILED.into());
+        let _ = card.append_request(request);
+    }
 }
 
 fn stage_inner(
@@ -1168,6 +1243,7 @@ fn stage_inner(
             cancellable: !changes.is_empty(),
             expected: SoftwareIdentity::of(&new),
             before: SoftwareIdentity::of(&before),
+            error: None,
         });
         ensure!(
             record.to_bytes().len() <= MAX_RECORD_BYTES,
@@ -1216,6 +1292,7 @@ fn stage_inner(
         }
         return Ok(summary("none", 0));
     }
+    card.forget_deleted(&[VERSION_FILE, DRAFT_FILE, REQUEST_FILE]);
     card.warm(
         staged
             .iter()
@@ -1400,8 +1477,30 @@ mod tests {
     }
 
     #[test]
-    fn lost_journal_does_not_claim_success_or_accept_another_update() {
+    fn a_request_whose_journal_was_not_written_fails_as_unstaged() {
         let (_dir, card) = card_with(&package(&["first"]));
+        let request = stage_request(
+            &card,
+            &package(&["second"]),
+            &gr3(),
+            &keys(),
+            &request_context(),
+        )
+        .unwrap();
+        // As when the rename of the journal failed after the checkpoint.
+        fs::remove_file(card.path(REQUEST_FILE)).unwrap();
+        fail_unstaged(&card, &request.request_id);
+        let failed = card.software_request().unwrap().unwrap();
+        assert_eq!(failed.status, SoftwareStatus::Failed);
+        assert_eq!(failed.error.as_deref(), Some(STAGING_FAILED));
+        let mut next = request_context();
+        next.request_id = "650e8400-e29b-41d4-a716-446655440000".into();
+        stage_request(&card, &package(&["second"]), &gr3(), &keys(), &next).unwrap();
+        assert_eq!(card.state().unwrap(), "waiting");
+    }
+    #[test]
+    fn an_expired_request_fails_durably_and_a_changed_card_still_blocks_updates() {
+        let (dir, card) = card_with(&package(&["first"]));
         stage_request(
             &card,
             &package(&["second"]),
@@ -1410,19 +1509,33 @@ mod tests {
             &request_context(),
         )
         .unwrap();
+        // The camera deletes a request that nobody confirms in time.
         fs::remove_file(card.path(REQUEST_FILE)).unwrap();
+        let expired = card.software_request().unwrap().unwrap();
+        assert_eq!(expired.status, SoftwareStatus::Failed);
+        assert_eq!(expired.phase, SoftwarePhase::Completed);
+        assert_eq!(expired.error.as_deref(), Some(CONFIRMATION_EXPIRED));
+        assert!(!expired.cancellable);
+        // The outcome survives a restart of the service.
+        assert_eq!(
+            Card::new(dir.path()).software_request().unwrap().unwrap(),
+            expired
+        );
+        let mut next = request_context();
+        next.request_id = "650e8400-e29b-41d4-a716-446655440000".into();
+        stage_request(&card, &package(&["third"]), &gr3(), &keys(), &next).unwrap();
+        // Software that is neither the old nor the new one is uncertain.
+        fs::remove_file(card.path(REQUEST_FILE)).unwrap();
+        let live = card.path(grkit_core::card::PACKAGE_LIST);
+        let mut list = fs::read(&live).unwrap();
+        list.extend_from_slice(b"\n");
+        fs::write(&live, list).unwrap();
         let recovered = card.software_request().unwrap().unwrap();
         assert_eq!(recovered.status, SoftwareStatus::Running);
         assert_eq!(recovered.phase, SoftwarePhase::Recovering);
         assert!(!recovered.cancellable);
-        assert!(stage_request(
-            &card,
-            &package(&["third"]),
-            &gr3(),
-            &keys(),
-            &request_context()
-        )
-        .is_err());
+        next.request_id = "750e8400-e29b-41d4-a716-446655440000".into();
+        assert!(stage_request(&card, &package(&["fourth"]), &gr3(), &keys(), &next).is_err());
     }
 
     #[test]
@@ -1613,6 +1726,20 @@ mod tests {
         run_journal(&card);
         let completed = Card::new(dir.path()).software_request().unwrap().unwrap();
         assert_eq!(completed.status, SoftwareStatus::Succeeded);
+        // The files that the rollback put aside have no later use.
+        let mut left = Vec::new();
+        let mut folders = vec![card.path(UPDATE_FOLDER)];
+        while let Some(folder) = folders.pop() {
+            for entry in fs::read_dir(folder).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    folders.push(entry.path());
+                } else {
+                    left.push(entry.path());
+                }
+            }
+        }
+        assert!(left.is_empty(), "{left:?}");
         assert_eq!(
             completed.expected,
             SoftwareIdentity::of(&card.live_files().unwrap())
@@ -1674,14 +1801,13 @@ mod tests {
         ctx.request_id = "750e8400-e29b-41d4-a716-446655440000".into();
         stage_rollback_request_with_keys(&card, &target.digest, &ctx, &keys()).unwrap();
         fs::remove_file(card.path(REQUEST_FILE)).unwrap();
-        let uncertain = Card::new(dir.path()).software_request().unwrap().unwrap();
-        assert_eq!(uncertain.status, SoftwareStatus::Running);
-        assert_eq!(uncertain.phase, SoftwarePhase::Recovering);
-        assert!(!uncertain.cancellable);
-        let unchanged = card_snapshot(&card);
+        let expired = Card::new(dir.path()).software_request().unwrap().unwrap();
+        assert_eq!(expired.status, SoftwareStatus::Failed);
+        assert_eq!(expired.error.as_deref(), Some(CONFIRMATION_EXPIRED));
+        // The backup is unchanged, so the rollback can be requested again.
         ctx.request_id = "850e8400-e29b-41d4-a716-446655440000".into();
-        assert!(stage_rollback_request_with_keys(&card, &target.digest, &ctx, &keys()).is_err());
-        assert_eq!(card_snapshot(&card), unchanged);
+        stage_rollback_request_with_keys(&card, &target.digest, &ctx, &keys()).unwrap();
+        assert_eq!(card.state().unwrap(), "waiting");
     }
 
     #[test]

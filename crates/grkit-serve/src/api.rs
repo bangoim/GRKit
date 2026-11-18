@@ -651,6 +651,77 @@ impl Service {
         }
     }
 
+    /// The checks of a software mutation that need no body. The transport
+    /// runs them before it receives a package of several megabytes, and
+    /// answers at once when one fails. The request repeats them all after
+    /// the body. A known request ID is a replay, which the request answers.
+    pub fn precheck(&self, request: &Request, env: &Env<impl Files>) -> Option<Reply> {
+        let domain = match (request.method.as_str(), request.path.as_str()) {
+            ("PUT", "/v1/update") => "update",
+            ("POST", "/v1/rollback") => "rollback",
+            _ => return None,
+        };
+        let header = |name: &str| request.headers.get(name).map(String::as_str);
+        let Some(id) =
+            header("x-grkit-request-id").filter(|id| crate::protocol::valid_request_id(id))
+        else {
+            return Some(Reply::problem(Problem::new(
+                400,
+                "invalid_request_id",
+                "Supply a UUID request ID.",
+            )));
+        };
+        if self
+            .requests
+            .lock()
+            .is_ok_and(|cache| cache.get(id, Instant::now()).is_ok())
+        {
+            return None;
+        }
+        let Ok(card_id) = self.current_card_id(env.card.root()) else {
+            return Some(unavailable(
+                "card_identity_unavailable",
+                "The card identity is unavailable.",
+            ));
+        };
+        if header("x-grkit-boot-id") != Some(&self.boot_id)
+            || header("x-grkit-card-id") != Some(&card_id)
+        {
+            return Some(Reply::problem(Problem::new(
+                409,
+                "context_changed",
+                "Read current boot and card identities before writing.",
+            )));
+        }
+        match (env.device)() {
+            Ok(device) if device.serial_number.is_some() => {}
+            Ok(_) => {
+                return Some(unavailable(
+                    "device_identity_unavailable",
+                    "The camera identity is unavailable.",
+                ))
+            }
+            Err(error) => return Some(unavailable("camera_unavailable", &format!("{error:#}"))),
+        }
+        if self.looks.recovery_required() {
+            return Some(unavailable(
+                "recovery_required",
+                "Recover the Looks transaction before changing software.",
+            ));
+        }
+        let resource = self.software(domain, env);
+        if resource.status != 200 {
+            return Some(resource);
+        }
+        if let Err(error) = check_precondition(
+            Some(&strong_etag(&resource.body)),
+            header("if-match"),
+            header("if-none-match"),
+        ) {
+            return Some(Reply::problem(error));
+        }
+        software_pending(env.card)
+    }
     fn mutate_software(&self, request: &Request, body: &[u8], env: &Env<impl Files>) -> Reply {
         let header = |name: &str| request.headers.get(name).map(String::as_str);
         let Some(id) =
@@ -773,6 +844,11 @@ impl Service {
                     header("if-none-match"),
                 ) {
                     return Reply::problem(error);
+                }
+            }
+            if !request.path.ends_with("/cancel") {
+                if let Some(reply) = software_pending(env.card) {
+                    return reply;
                 }
             }
             let context = crate::update::SoftwareContext {
@@ -981,8 +1057,35 @@ fn recovered_cancel_matches(
 fn software_summary(request: &crate::update::SoftwareRequest) -> Value {
     use crate::update::SoftwarePhase;
     json!({"requestId":request.request_id,"domain":request.domain,"bootId":request.boot_id,"cardId":request.card_id,"status":request.status,"phase":request.phase,"progress":null,"cancellable":request.cancellable,
-        "requiredAction":match request.phase {SoftwarePhase::AwaitingConfirmation => Some("confirmOnCamera"),SoftwarePhase::AwaitingRestart => Some("restartCamera"),_=>None},
-        "result":if request.status==SoftwareStatus::Succeeded {json!({"identity":request.expected.digest})} else {Value::Null},"error":null})
+    "requiredAction":match request.phase {SoftwarePhase::AwaitingConfirmation => Some("confirmOnCamera"),SoftwarePhase::AwaitingRestart => Some("restartCamera"),_=>None},
+    "result":if request.status==SoftwareStatus::Succeeded {json!({"identity":request.expected.digest})} else {Value::Null},
+    "error":request.error.as_deref().map(|code| json!({"code":code,"detail":match code {
+        crate::update::CONFIRMATION_EXPIRED => "Nobody confirmed the request on the camera in time.",
+        crate::update::STAGING_FAILED => "The update could not be written to the card.",
+        _ => "The request failed.",
+    }}))})
+}
+
+/// A request that waits on the camera, or an earlier one whose outcome is
+/// not yet known, blocks a new update or rollback.
+fn software_pending(card: &crate::update::Card) -> Option<Reply> {
+    let pending = || {
+        Some(Reply::problem(Problem::new(
+            409,
+            "software_pending",
+            "Finish or cancel the pending software request first.",
+        )))
+    };
+    match card.state() {
+        Ok("none") => {}
+        Ok(_) => return pending(),
+        Err(error) => return Some(unavailable("card_not_ready", &format!("{error:#}"))),
+    }
+    match card.software_request() {
+        Ok(Some(previous)) if previous.status == SoftwareStatus::Running => pending(),
+        Ok(_) => None,
+        Err(error) => Some(unavailable("recovery_required", &format!("{error:#}"))),
+    }
 }
 
 fn unavailable(code: &'static str, detail: &str) -> Reply {
@@ -1068,6 +1171,78 @@ mod tests {
     }
     fn body(reply: &Reply) -> Value {
         serde_json::from_slice(&reply.body).unwrap()
+    }
+    #[test]
+    fn an_update_that_cannot_succeed_is_answered_before_its_package() {
+        let (_root, card) = card();
+        let service = service();
+        let precheck = |id: &str, card_id: &str, etag: Option<&str>| {
+            let mut request =
+                crate::parse(b"PUT /v1/update HTTP/1.1\r\nContent-Length: 5000000\r\n\r\n")
+                    .unwrap();
+            for (key, value) in [
+                ("x-grkit-request-id", id),
+                ("x-grkit-boot-id", service.boot_id.as_str()),
+                ("x-grkit-card-id", card_id),
+            ] {
+                request.headers.insert(key.into(), value.into());
+            }
+            if let Some(etag) = etag {
+                request.headers.insert("if-match".into(), etag.into());
+            }
+            service
+                .precheck(
+                    &request,
+                    &Env {
+                        files: &crate::System,
+                        connection: &crate::Connection {
+                            local: "127.0.0.1:8080".into(),
+                            peer: "127.0.0.1:50000".into(),
+                        },
+                        card: &card,
+                        device: &|| {
+                            Ok(crate::update::Device {
+                                model: "RICOH GR III".into(),
+                                firmware: "2.21".into(),
+                                free_bytes: Some(1 << 30),
+                                serial_number: Some("test-camera".into()),
+                            })
+                        },
+                    },
+                )
+                .map(|reply| (reply.status, body(&reply)["code"].clone()))
+        };
+        let etag =
+            strong_etag(&call(&service, &card, "GET", "/v1/update", b"", REQUEST, None).body);
+        assert_eq!(precheck(REQUEST, "card-test", Some(&etag)), None);
+        assert_eq!(precheck("x", "card-test", Some(&etag)).unwrap().0, 400);
+        assert_eq!(
+            precheck(REQUEST, "other-card", Some(&etag)).unwrap(),
+            (409, json!("context_changed"))
+        );
+        assert_eq!(
+            precheck(REQUEST, "card-test", Some("\"old\"")).unwrap().0,
+            412
+        );
+        // A request that waits on the camera blocks the next one.
+        let zip = testing::signed_package(&camera::GR3, "1.7.0", &["second"]);
+        let staged = call(
+            &service,
+            &card,
+            "PUT",
+            "/v1/update",
+            &zip,
+            REQUEST,
+            Some(&etag),
+        );
+        assert_eq!(staged.status, 202, "{}", body(&staged));
+        let etag = strong_etag(&call(&service, &card, "GET", "/v1/update", b"", CANCEL, None).body);
+        assert_eq!(
+            precheck(CANCEL, "card-test", Some(&etag)).unwrap(),
+            (409, json!("software_pending"))
+        );
+        // A replay of a known request is answered by the request itself.
+        assert_eq!(precheck(REQUEST, "card-test", Some(&etag)), None);
     }
     #[test]
     fn update_retries_and_targeted_cancel_survive_service_restart() {

@@ -90,7 +90,13 @@ pub fn admit(request: &Request, local: SocketAddr) -> Result<(), Response> {
             "This endpoint does not accept a request body",
         ));
     }
-    if request.headers.contains_key("expect") {
+    // The service answers `100-continue` (or a final status) before it
+    // reads a body; it supports no other expectation.
+    if request
+        .headers
+        .get("expect")
+        .is_some_and(|value| !value.eq_ignore_ascii_case("100-continue"))
+    {
         return Err(Response::error(417, "Expect is not supported"));
     }
     Ok(())
@@ -135,6 +141,10 @@ impl<'a> DeadlineReader<'a> {
             deadline: Instant::now() + TRANSFER_TIMEOUT,
         }
     }
+    /// The connection, to answer before the body is read.
+    pub fn get_mut(&mut self) -> &mut TcpStream {
+        self.stream
+    }
 }
 impl Read for DeadlineReader<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
@@ -175,6 +185,17 @@ mod tests {
             assert!(!accepted("Host: 192.168.0.1:8080\r\n", method));
             assert!(accepted("Host: 192.168.0.1:8080\r\nX-GRKit-Request-Id: 550e8400-e29b-41d4-a716-446655440000\r\n", method));
         }
+    }
+    #[test]
+    fn only_the_continue_expectation_is_accepted() {
+        assert!(accepted(
+            "Host: 192.168.0.1:8080\r\nExpect: 100-continue\r\n",
+            "GET"
+        ));
+        assert!(!accepted(
+            "Host: 192.168.0.1:8080\r\nExpect: something-else\r\n",
+            "GET"
+        ));
     }
     #[test]
     fn connection_slots_are_bounded_and_released() {
